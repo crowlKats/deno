@@ -309,7 +309,7 @@ pub fn flags_from_vec_safe(args: Vec<String>) -> clap::Result<Flags> {
   Ok(flags)
 }
 
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(
   name = "deno",
   version = crate::version::DENO.as_str(),
@@ -341,7 +341,7 @@ struct Opt {
   subcommand: Option<Subcommand>,
 }
 
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 enum Subcommand {
   Bundle(BundleSubcommand),
   Cache(CacheSubcommand),
@@ -361,7 +361,7 @@ enum Subcommand {
 }
 
 /// Bundle module and dependencies into single file
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(long_about = "Output a single JavaScript file with all dependencies.
   deno bundle https://deno.land/std/examples/colors.ts colors.bundle.js
 
@@ -381,7 +381,7 @@ struct BundleSubcommand {
 }
 
 /// Cache the dependencies
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(long_about = "Cache and compile remote dependencies recursively.
 
 Download and compile a module with all of its static dependencies and save them
@@ -410,7 +410,7 @@ struct CacheSubcommand {
 ///     settle with the generic name.
 ///   - If the resulting name has an '@...' suffix, strip it.
 /// Cross compiling binaries for different platforms is not currently possible.
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 struct CompileSubcommand {
   source_file: String,
 
@@ -422,7 +422,7 @@ struct CompileSubcommand {
   compilaton: CompilationArgs,
 }
 
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[allow(clippy::enum_variant_names)]
 enum Shell {
   Bash,
@@ -433,7 +433,7 @@ enum Shell {
 }
 
 /// Generate shell completions
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(
   setting = AppSettings::DisableHelpSubcommand,
   long_about = "Output shell completion script to standard output.
@@ -466,7 +466,7 @@ struct CompletionsSubcommand {
 /// Show documentation for runtime built-ins:
 ///     deno doc
 ///     deno doc --builtin Deno.Listener
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(setting = AppSettings::AllowLeadingHyphen)]
 struct DocSubcommand {
   /// Output documentation in JSON format
@@ -491,7 +491,7 @@ struct DocSubcommand {
 }
 
 /// Eval script
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(long_about = "Evaluate JavaScript from the command line.
   deno eval \"console.log('hello world')\"
 
@@ -517,7 +517,7 @@ struct EvalSubcommand {
 }
 
 /// Format source files
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(long_about = "Auto-format JavaScript/TypeScript source code.
   deno fmt
   deno fmt myfile1.ts myfile2.ts
@@ -553,7 +553,7 @@ struct FmtSubcommand {
 }
 
 /// Show info about cache or info related to source file
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(long_about = "Information about a module or the cache directories.
 
 Get information about a module:
@@ -612,7 +612,7 @@ struct InfoSubcommand {
 }
 
 /// Install script as an executable
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(
   setting = AppSettings::TrailingVarArg,
   long_about = "Installs a script as an executable in the installation root's bin directory.
@@ -664,7 +664,7 @@ struct InstallSubcommand {
 }
 
 /// Lint source files
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(long_about = "Lint JavaScript/TypeScript source code.
   deno lint --unstable
   deno lint --unstable myfile1.ts myfile2.js
@@ -714,14 +714,14 @@ struct LintSubcommand {
 }
 
 /// Read Eval Print Loop
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 struct ReplSubcommand {
   #[clap(flatten)]
   runtime: RuntimeArgs,
 }
 
 /// Run a program given a filename or url to the module. Use '-' as a filename to read from stdin.
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(
   setting = AppSettings::TrailingVarArg,
   long_about = "Run a program given a filename or url to the module.
@@ -774,7 +774,7 @@ Only local files from entry point module graph are watched."
 }
 
 /// Run tests
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(
   setting = AppSettings::TrailingVarArg,
   long_about = "Run tests using Deno's built-in test runner.
@@ -835,7 +835,7 @@ struct TestSubcommand {
 }
 
 /// Print runtime TypeScript declarations.
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(long_about = "Print runtime TypeScript declarations.
   deno types > lib.deno.d.ts
 
@@ -843,7 +843,7 @@ The declaration file could be saved and used for typing information.")]
 struct TypesSubcommand {}
 
 /// Upgrade deno executable to given version
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 #[clap(long_about = "Upgrade deno executable to the given version.
 Defaults to latest.
 
@@ -879,7 +879,7 @@ struct UpgradeSubcommand {
   ca_file: CAFileArg,
 }
 
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 struct CompilationArgs {
   /// Do not resolve remote modules
   #[clap(long)]
@@ -911,7 +911,7 @@ struct CompilationArgs {
   ca_file: CAFileArg,
 }
 
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 struct ImportMapArg {
   /// UNSTABLE: Load import map file
   #[clap(
@@ -928,7 +928,7 @@ Examples: https://github.com/WICG/import-maps#the-import-map"
   import_map: Option<String>,
 }
 
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 struct ReloadArg {
   /// Reload source code cache (recompile TypeScript)
   ///
@@ -948,14 +948,14 @@ struct ReloadArg {
   reload: Option<Vec<String>>,
 }
 
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 struct CAFileArg {
   /// Load certificate authority from PEM encoded file
   #[clap(long, value_name = "FILE")]
   cert: Option<String>,
 }
 
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 struct PermissionArgs {
   /// Allow file system read access
   #[clap(
@@ -1000,7 +1000,7 @@ struct PermissionArgs {
   allow_all: bool,
 }
 
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 struct RuntimeArgs {
   /// activate inspector on host:port (default: 127.0.0.1:9229)
   #[clap(long, value_name = "HOST:PORT", require_equals = true, validator = inspect_arg_validate)]
@@ -1029,7 +1029,7 @@ struct RuntimeArgs {
   compilation: CompilationArgs,
 }
 
-#[derive(Clap, Debug, Clone)]
+#[derive(Clap, Clone, Debug)]
 struct WatchArg {
   /// Watch for file changes and restart process automatically
   #[clap(
