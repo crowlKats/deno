@@ -16,6 +16,9 @@ pub enum DenoSubcommand {
     source_file: String,
     out_file: Option<PathBuf>,
   },
+  Cache {
+    files: Vec<String>,
+  },
   Compile {
     source_file: String,
     output: Option<PathBuf>,
@@ -34,9 +37,6 @@ pub enum DenoSubcommand {
     code: String,
     as_typescript: bool,
   },
-  Cache {
-    files: Vec<String>,
-  },
   Fmt {
     check: bool,
     files: Vec<PathBuf>,
@@ -53,6 +53,7 @@ pub enum DenoSubcommand {
     root: Option<PathBuf>,
     force: bool,
   },
+  LanguageServer,
   Lint {
     files: Vec<PathBuf>,
     ignore: Vec<PathBuf>,
@@ -278,6 +279,7 @@ pub fn flags_from_vec_safe(args: Vec<String>) -> clap::Result<Flags> {
     Some(("doc", m)) => doc_parse(&mut flags, m),
     Some(("lint", m)) => lint_parse(&mut flags, m),
     Some(("compile", m)) => compile_parse(&mut flags, m),
+    Some(("lsp", m)) => language_server_parse(&mut flags, m),
     _ => repl_parse(&mut flags, &matches),
   }
 
@@ -330,6 +332,7 @@ If the flag is set, restrict these messages to errors.",
     .subcommand(fmt_subcommand())
     .subcommand(info_subcommand())
     .subcommand(install_subcommand())
+    .subcommand(language_server_subcommand())
     .subcommand(lint_subcommand())
     .subcommand(repl_subcommand())
     .subcommand(run_subcommand())
@@ -674,6 +677,10 @@ fn doc_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
     filter,
     private,
   };
+}
+
+fn language_server_parse(flags: &mut Flags, _matches: &clap::ArgMatches) {
+  flags.subcommand = DenoSubcommand::LanguageServer;
 }
 
 fn lint_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
@@ -1055,6 +1062,17 @@ Show documentation for runtime built-ins:
         .takes_value(true)
         .required(false)
         .conflicts_with("json"),
+    )
+}
+
+fn language_server_subcommand<'a>() -> App<'a> {
+  App::new("lsp")
+    .about("Start the language server")
+    .long_about(
+      r#"Start the Deno language server which will take input
+from stdin and provide output to stdout.
+  deno lsp
+"#,
     )
 }
 
@@ -1925,6 +1943,18 @@ mod tests {
         },
         watch: true,
         unstable: true,
+        ..Flags::default()
+      }
+    );
+  }
+
+  #[test]
+  fn language_server() {
+    let r = flags_from_vec_safe(svec!["deno", "lsp"]);
+    assert_eq!(
+      r.unwrap(),
+      Flags {
+        subcommand: DenoSubcommand::LanguageServer,
         ..Flags::default()
       }
     );
