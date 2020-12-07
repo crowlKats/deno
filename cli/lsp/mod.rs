@@ -60,7 +60,7 @@ pub fn start() -> Result<(), AnyError> {
 
   let version = format!(
     "{} ({}, {})",
-    crate::version::deno(),
+    *crate::version::DENO,
     env!("PROFILE"),
     env!("TARGET")
   );

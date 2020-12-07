@@ -354,7 +354,7 @@ enum Subcommand {
   Fmt(FmtSubcommand),
   Info(InfoSubcommand),
   Install(InstallSubcommand),
-  Lsp(LspCommand),
+  Lsp(LspSubcommand),
   Lint(LintSubcommand),
   Repl(ReplSubcommand),
   Run(RunSubcommand),
@@ -672,7 +672,7 @@ struct InstallSubcommand {
 from stdin and provide output to stdout.
   deno lsp
 "#)]
-struct LspCommand {}
+struct LspSubcommand {}
 
 /// Lint source files
 #[derive(Clap, Clone, Debug)]
