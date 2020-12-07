@@ -15,6 +15,9 @@ pub enum DenoSubcommand {
     source_file: String,
     out_file: Option<PathBuf>,
   },
+  Cache {
+    files: Vec<String>,
+  },
   Compile {
     source_file: String,
     output: Option<PathBuf>,
@@ -33,9 +36,6 @@ pub enum DenoSubcommand {
     code: String,
     as_typescript: bool,
   },
-  Cache {
-    files: Vec<String>,
-  },
   Fmt {
     check: bool,
     files: Vec<PathBuf>,
@@ -52,6 +52,7 @@ pub enum DenoSubcommand {
     root: Option<PathBuf>,
     force: bool,
   },
+  LanguageServer,
   Lint {
     files: Vec<PathBuf>,
     ignore: Vec<PathBuf>,
@@ -274,6 +275,7 @@ pub fn flags_from_vec_safe(args: Vec<String>) -> clap::Result<Flags> {
       Subcommand::Fmt(m) => fmt_parse(&mut flags, m),
       Subcommand::Info(m) => info_parse(&mut flags, m),
       Subcommand::Install(m) => install_parse(&mut flags, m),
+      Subcommand::Lsp(m) => lsp_parse(&mut flags, m),
       Subcommand::Lint(m) => lint_parse(&mut flags, m),
       Subcommand::Repl(m) => repl_parse(&mut flags, m),
       Subcommand::Run(m) => run_parse(&mut flags, m),
@@ -352,6 +354,7 @@ enum Subcommand {
   Fmt(FmtSubcommand),
   Info(InfoSubcommand),
   Install(InstallSubcommand),
+  Lsp(LspCommand),
   Lint(LintSubcommand),
   Repl(ReplSubcommand),
   Run(RunSubcommand),
@@ -662,6 +665,14 @@ struct InstallSubcommand {
   #[clap(flatten)]
   permissions: PermissionArgs,
 }
+
+/// Start the language server
+#[derive(Clap, Clone, Debug)]
+#[clap(long_about = r#"Start the Deno language server which will take input
+from stdin and provide output to stdout.
+  deno lsp
+"#)]
+struct LspCommand {}
 
 /// Lint source files
 #[derive(Clap, Clone, Debug)]
@@ -1167,6 +1178,10 @@ fn install_parse(flags: &mut Flags, matches: InstallSubcommand) {
     root: matches.root,
     force: matches.force,
   };
+}
+
+fn lsp_parse(flags: &mut Flags, _matches: LspSubcommand) {
+  flags.subcommand = DenoSubcommand::LanguageServer;
 }
 
 fn lint_parse(flags: &mut Flags, matches: LintSubcommand) {
@@ -1713,6 +1728,18 @@ mod tests {
         },
         watch: true,
         unstable: true,
+        ..Flags::default()
+      }
+    );
+  }
+
+  #[test]
+  fn language_server() {
+    let r = flags_from_vec_safe(svec!["deno", "lsp"]);
+    assert_eq!(
+      r.unwrap(),
+      Flags {
+        subcommand: DenoSubcommand::LanguageServer,
         ..Flags::default()
       }
     );
