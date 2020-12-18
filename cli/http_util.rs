@@ -18,7 +18,7 @@ use std::fs::File;
 use std::io::Read;
 
 pub fn get_user_agent() -> String {
-  format!("Deno/{}", version::deno())
+  format!("Deno/{}", *version::DENO)
 }
 
 /// Create new instance of async reqwest::Client. This client supports
