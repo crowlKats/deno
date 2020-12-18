@@ -224,9 +224,13 @@ lazy_static! {
   static ref LONG_VERSION: String = format!(
     "{} ({}, {})\nv8 {}\ntypescript {}",
     *crate::version::DENO,
-    env!("PROFILE"),
+    if crate::version::is_canary() {
+      "canary"
+    } else {
+      env!("PROFILE")
+    },
     env!("TARGET"),
-    crate::version::v8(),
+    deno_core::v8_version(),
     crate::version::TYPESCRIPT
   );
 }
@@ -2586,7 +2590,7 @@ mod tests {
 
   #[test]
   fn completions() {
-    let r = flags_from_vec_safe(svec!["deno", "completions", "bash"]).unwrap();
+    let r = flags_from_vec_safe(svec!["deno", "completions", "zsh"]).unwrap();
 
     match r.subcommand {
       DenoSubcommand::Completions { buf } => assert!(!buf.is_empty()),
