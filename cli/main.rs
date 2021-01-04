@@ -70,14 +70,12 @@ use deno_doc as doc;
 use deno_doc::parser::DocFileLoader;
 use deno_runtime::ops::worker_host::CreateWebWorkerCb;
 use deno_runtime::permissions::Permissions;
-use deno_runtime::permissions::PermissionsOptions;
 use deno_runtime::web_worker::WebWorker;
 use deno_runtime::web_worker::WebWorkerOptions;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::worker::WorkerOptions;
 use log::Level;
 use log::LevelFilter;
-use std::cell::RefCell;
 use std::env;
 use std::io::Read;
 use std::io::Write;
@@ -86,23 +84,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-
-impl From<Flags> for PermissionsOptions {
-  fn from(flags: Flags) -> Self {
-    Self {
-      allow_env: flags.allow_env,
-      allow_hrtime: flags.allow_hrtime,
-      allow_net: flags.allow_net,
-      allow_plugin: flags.allow_plugin,
-      allow_read: flags.allow_read,
-      allow_run: flags.allow_run,
-      allow_write: flags.allow_write,
-      net_allowlist: flags.net_allowlist,
-      read_allowlist: flags.read_allowlist,
-      write_allowlist: flags.write_allowlist,
-    }
-  }
-}
+use std::sync::Mutex;
 
 fn create_web_worker_callback(
   program_state: Arc<ProgramState>,
@@ -116,7 +98,7 @@ fn create_web_worker_callback(
     });
 
     let attach_inspector = program_state.maybe_inspector_server.is_some()
-      || program_state.flags.coverage;
+      || program_state.coverage_dir.is_some();
     let maybe_inspector_server = program_state.maybe_inspector_server.clone();
 
     let module_loader = CliModuleLoader::new_for_worker(program_state.clone());
@@ -192,7 +174,7 @@ pub fn create_main_worker(
 
   let attach_inspector = program_state.maybe_inspector_server.is_some()
     || program_state.flags.repl
-    || program_state.flags.coverage;
+    || program_state.coverage_dir.is_some();
   let maybe_inspector_server = program_state.maybe_inspector_server.clone();
   let should_break_on_first_statement =
     program_state.flags.inspect_brk.is_some();
@@ -367,7 +349,7 @@ async fn info_command(
   let program_state = ProgramState::new(flags)?;
   if let Some(specifier) = maybe_specifier {
     let specifier = ModuleSpecifier::resolve_url_or_path(&specifier)?;
-    let handler = Rc::new(RefCell::new(specifier_handler::FetchHandler::new(
+    let handler = Arc::new(Mutex::new(specifier_handler::FetchHandler::new(
       &program_state,
       // info accesses dynamically imported modules just for their information
       // so we allow access to all of them.
@@ -416,7 +398,7 @@ async fn install_command(
 }
 
 async fn language_server_command() -> Result<(), AnyError> {
-  lsp::start()
+  lsp::start().await
 }
 
 async fn lint_command(
@@ -515,7 +497,7 @@ async fn create_module_graph_and_maybe_check(
   program_state: Arc<ProgramState>,
   debug: bool,
 ) -> Result<module_graph::Graph, AnyError> {
-  let handler = Rc::new(RefCell::new(FetchHandler::new(
+  let handler = Arc::new(Mutex::new(FetchHandler::new(
     &program_state,
     // when bundling, dynamic imports are only access for their type safety,
     // therefore we will allow the graph to access any module.
@@ -868,7 +850,7 @@ async fn run_with_watch(flags: Flags, script: String) -> Result<(), AnyError> {
     async move {
       let main_module = ModuleSpecifier::resolve_url_or_path(&script1)?;
       let program_state = ProgramState::new(flags)?;
-      let handler = Rc::new(RefCell::new(FetchHandler::new(
+      let handler = Arc::new(Mutex::new(FetchHandler::new(
         &program_state,
         Permissions::allow_all(),
       )?));
@@ -948,11 +930,31 @@ async fn run_command(flags: Flags, script: String) -> Result<(), AnyError> {
   let permissions = Permissions::from_options(&flags.clone().into());
   let mut worker =
     create_main_worker(&program_state, main_module.clone(), permissions);
+
+  let mut maybe_coverage_collector =
+    if let Some(ref coverage_dir) = program_state.coverage_dir {
+      let session = worker.create_inspector_session();
+
+      let coverage_dir = PathBuf::from(coverage_dir);
+      let mut coverage_collector =
+        tools::coverage::CoverageCollector::new(coverage_dir, session);
+      coverage_collector.start_collecting().await?;
+
+      Some(coverage_collector)
+    } else {
+      None
+    };
+
   debug!("main_module {}", main_module);
   worker.execute_module(&main_module).await?;
   worker.execute("window.dispatchEvent(new Event('load'))")?;
   worker.run_event_loop().await?;
   worker.execute("window.dispatchEvent(new Event('unload'))")?;
+
+  if let Some(coverage_collector) = maybe_coverage_collector.as_mut() {
+    coverage_collector.stop_collecting().await?;
+  }
+
   Ok(())
 }
 
@@ -1018,16 +1020,23 @@ async fn test_command(
   let mut worker =
     create_main_worker(&program_state, main_module.clone(), permissions);
 
-  let mut maybe_coverage_collector = if flags.coverage {
-    let session = worker.create_inspector_session();
-    let mut coverage_collector =
-      tools::coverage::CoverageCollector::new(session);
-    coverage_collector.start_collecting().await?;
+  if let Some(ref coverage_dir) = flags.coverage_dir {
+    env::set_var("DENO_UNSTABLE_COVERAGE_DIR", coverage_dir);
+  }
 
-    Some(coverage_collector)
-  } else {
-    None
-  };
+  let mut maybe_coverage_collector =
+    if let Some(ref coverage_dir) = program_state.coverage_dir {
+      let session = worker.create_inspector_session();
+
+      let coverage_dir = PathBuf::from(coverage_dir);
+      let mut coverage_collector =
+        tools::coverage::CoverageCollector::new(coverage_dir, session);
+      coverage_collector.start_collecting().await?;
+
+      Some(coverage_collector)
+    } else {
+      None
+    };
 
   let execute_result = worker.execute_module(&main_module).await;
   execute_result?;
@@ -1037,19 +1046,19 @@ async fn test_command(
   worker.run_event_loop().await?;
 
   if let Some(coverage_collector) = maybe_coverage_collector.as_mut() {
-    let coverages = coverage_collector.collect().await?;
     coverage_collector.stop_collecting().await?;
 
-    let filtered_coverages = tools::coverage::filter_script_coverages(
-      coverages,
-      main_module.as_url().clone(),
-      test_modules,
-    );
-
-    let mut coverage_reporter =
-      tools::coverage::PrettyCoverageReporter::new(quiet);
-    for coverage in filtered_coverages {
-      coverage_reporter.visit_coverage(&coverage);
+    // TODO(caspervonb) extract reporting into it's own subcommand.
+    // For now, we'll only report for the command that passed --coverage as a flag.
+    if flags.coverage_dir.is_some() {
+      let mut exclude = test_modules.clone();
+      let main_module_url = main_module.as_url().to_owned();
+      exclude.push(main_module_url);
+      tools::coverage::report_coverages(
+        &coverage_collector.dir,
+        quiet,
+        exclude,
+      )?;
     }
   }
 

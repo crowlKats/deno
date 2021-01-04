@@ -8,7 +8,6 @@ use deno_core::error::AnyError;
 use deno_core::serde_json;
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
-use deno_core::url;
 use deno_core::url::Url;
 use deno_core::AsyncRefCell;
 use deno_core::BufVec;
@@ -126,7 +125,7 @@ where
     None => Method::GET,
   };
 
-  let url_ = url::Url::parse(&url)?;
+  let url_ = Url::parse(&url)?;
 
   // Check scheme before asking for net permission
   let scheme = url_.scheme();
@@ -155,7 +154,10 @@ where
   }
   //debug!("Before fetch {}", url);
 
-  let res = request.send().await?;
+  let res = match request.send().await {
+    Ok(res) => res,
+    Err(e) => return Err(type_error(e.to_string())),
+  };
 
   //debug!("Fetch response {}", url);
   let status = res.status();
@@ -260,6 +262,7 @@ where
   #[serde(default)]
   struct CreateHttpClientOptions {
     ca_file: Option<String>,
+    ca_data: Option<String>,
   }
 
   let args: CreateHttpClientOptions = serde_json::from_value(args)?;
@@ -269,7 +272,9 @@ where
     permissions.check_read(&PathBuf::from(ca_file))?;
   }
 
-  let client = create_http_client(args.ca_file.as_deref()).unwrap();
+  let client =
+    create_http_client(args.ca_file.as_deref(), args.ca_data.as_deref())
+      .unwrap();
 
   let rid = state.resource_table.add(HttpClientResource::new(client));
   Ok(json!(rid))
@@ -277,9 +282,16 @@ where
 
 /// Create new instance of async reqwest::Client. This client supports
 /// proxies and doesn't follow redirects.
-fn create_http_client(ca_file: Option<&str>) -> Result<Client, AnyError> {
+fn create_http_client(
+  ca_file: Option<&str>,
+  ca_data: Option<&str>,
+) -> Result<Client, AnyError> {
   let mut builder = Client::builder().redirect(Policy::none()).use_rustls_tls();
-  if let Some(ca_file) = ca_file {
+  if let Some(ca_data) = ca_data {
+    let ca_data_vec = ca_data.as_bytes().to_vec();
+    let cert = reqwest::Certificate::from_pem(&ca_data_vec)?;
+    builder = builder.add_root_certificate(cert);
+  } else if let Some(ca_file) = ca_file {
     let mut buf = Vec::new();
     File::open(ca_file)?.read_to_end(&mut buf)?;
     let cert = reqwest::Certificate::from_pem(&buf)?;

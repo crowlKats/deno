@@ -4,10 +4,12 @@ use clap::AppSettings;
 use clap::ArgSettings;
 use clap::Clap;
 use clap::IntoApp;
+use deno_runtime::permissions::PermissionsOptions;
 use log::Level;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
+use tempfile::TempDir;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DenoSubcommand {
@@ -97,16 +99,16 @@ pub struct Flags {
 
   pub allow_env: bool,
   pub allow_hrtime: bool,
-  pub allow_net: bool,
+  pub allow_net: Option<Vec<String>>,
   pub allow_plugin: bool,
-  pub allow_read: bool,
+  pub allow_read: Option<Vec<PathBuf>>,
   pub allow_run: bool,
-  pub allow_write: bool,
+  pub allow_write: Option<Vec<PathBuf>>,
   pub cache_blocklist: Vec<String>,
   pub ca_file: Option<String>,
   pub cached_only: bool,
   pub config_path: Option<String>,
-  pub coverage: bool,
+  pub coverage_dir: Option<String>,
   pub ignore: Vec<PathBuf>,
   pub import_map_path: Option<String>,
   pub inspect: Option<SocketAddr>,
@@ -114,11 +116,9 @@ pub struct Flags {
   pub lock: Option<PathBuf>,
   pub lock_write: bool,
   pub log_level: Option<Level>,
-  pub net_allowlist: Vec<String>,
   pub no_check: bool,
   pub no_prompts: bool,
   pub no_remote: bool,
-  pub read_allowlist: Vec<PathBuf>,
   pub reload: bool,
   pub repl: bool,
   pub seed: Option<u64>,
@@ -126,7 +126,6 @@ pub struct Flags {
   pub v8_flags: Vec<String>,
   pub version: bool,
   pub watch: bool,
-  pub write_allowlist: Vec<PathBuf>,
 }
 
 fn join_paths(allowlist: &[PathBuf], d: &str) -> String {
@@ -143,32 +142,37 @@ impl Flags {
   pub fn to_permission_args(&self) -> Vec<String> {
     let mut args = vec![];
 
-    if !self.read_allowlist.is_empty() {
-      let s = format!("--allow-read={}", join_paths(&self.read_allowlist, ","));
-      args.push(s);
+    match &self.allow_read {
+      Some(read_allowlist) if read_allowlist.is_empty() => {
+        args.push("--allow-read".to_string());
+      }
+      Some(read_allowlist) => {
+        let s = format!("--allow-read={}", join_paths(read_allowlist, ","));
+        args.push(s);
+      }
+      _ => {}
     }
 
-    if self.allow_read {
-      args.push("--allow-read".to_string());
+    match &self.allow_write {
+      Some(write_allowlist) if write_allowlist.is_empty() => {
+        args.push("--allow-write".to_string());
+      }
+      Some(write_allowlist) => {
+        let s = format!("--allow-write={}", join_paths(write_allowlist, ","));
+        args.push(s);
+      }
+      _ => {}
     }
 
-    if !self.write_allowlist.is_empty() {
-      let s =
-        format!("--allow-write={}", join_paths(&self.write_allowlist, ","));
-      args.push(s);
-    }
-
-    if self.allow_write {
-      args.push("--allow-write".to_string());
-    }
-
-    if !self.net_allowlist.is_empty() {
-      let s = format!("--allow-net={}", self.net_allowlist.join(","));
-      args.push(s);
-    }
-
-    if self.allow_net {
-      args.push("--allow-net".to_string());
+    match &self.allow_net {
+      Some(net_allowlist) if net_allowlist.is_empty() => {
+        args.push("--allow-net".to_string());
+      }
+      Some(net_allowlist) => {
+        let s = format!("--allow-net={}", net_allowlist.join(","));
+        args.push(s);
+      }
+      _ => {}
     }
 
     if self.allow_env {
@@ -188,6 +192,20 @@ impl Flags {
     }
 
     args
+  }
+}
+
+impl From<Flags> for PermissionsOptions {
+  fn from(flags: Flags) -> Self {
+    Self {
+      allow_env: flags.allow_env,
+      allow_hrtime: flags.allow_hrtime,
+      allow_net: flags.allow_net,
+      allow_plugin: flags.allow_plugin,
+      allow_read: flags.allow_read,
+      allow_run: flags.allow_run,
+      allow_write: flags.allow_write,
+    }
   }
 }
 
@@ -823,10 +841,11 @@ struct TestSubcommand {
   #[clap(
     long,
     requires = "unstable",
+    require_equals = true,
     conflicts_with = "inspect",
-    conflicts_with = "inspect"
+    conflicts_with = "inspect_brk"
   )]
-  coverage: bool,
+  coverage: Option<Option<String>>, // TODO
 
   /// List of file names to run
   files: Vec<String>,
@@ -1059,7 +1078,9 @@ Only local files from entry point module graph are watched."
 fn bundle_parse(flags: &mut Flags, matches: BundleSubcommand) {
   compile_args_parse(flags, matches.compilation);
 
-  flags.allow_write = matches.out_file.is_some();
+  if matches.out_file.is_some() {
+    flags.allow_write = Some(vec![]);
+  };
 
   flags.watch = matches.watch.watch;
 
@@ -1126,11 +1147,11 @@ fn doc_parse(flags: &mut Flags, matches: DocSubcommand) {
 fn eval_parse(flags: &mut Flags, matches: EvalSubcommand) {
   runtime_args_parse(flags, matches.runtime);
 
-  flags.allow_net = true;
+  flags.allow_net = Some(vec![]);
   flags.allow_env = true;
   flags.allow_run = true;
-  flags.allow_read = true;
-  flags.allow_write = true;
+  flags.allow_read = Some(vec![]);
+  flags.allow_write = Some(vec![]);
   flags.allow_plugin = true;
   flags.allow_hrtime = true;
 
@@ -1202,11 +1223,11 @@ fn repl_parse(flags: &mut Flags, matches: ReplSubcommand) {
 
   flags.repl = true;
   flags.subcommand = DenoSubcommand::Repl;
-  flags.allow_net = true;
+  flags.allow_net = Some(vec![]);
   flags.allow_env = true;
   flags.allow_run = true;
-  flags.allow_read = true;
-  flags.allow_write = true;
+  flags.allow_read = Some(vec![]);
+  flags.allow_write = Some(vec![]);
   flags.allow_plugin = true;
   flags.allow_hrtime = true;
 }
@@ -1232,10 +1253,19 @@ fn test_parse(flags: &mut Flags, matches: TestSubcommand, quiet: bool) {
   runtime_args_parse(flags, matches.runtime);
   permission_args_parse(flags, matches.permissions);
 
-  flags.coverage = matches.coverage;
+  flags.coverage_dir = matches.coverage.map(|cov| {
+    cov.unwrap_or(TempDir::new()
+      .unwrap()
+      .into_path()
+      .to_str()
+      .unwrap()
+      .to_string())
+  });
 
   if !matches.script_arg.is_empty() {
-    flags.argv.extend_from_slice(&*matches.script_arg);
+    for arg in matches.script_arg {
+      flags.argv.push(arg);
+    }
   }
 
   let include = if matches.files.is_empty() {
@@ -1307,30 +1337,14 @@ fn runtime_args_parse(flags: &mut Flags, matches: RuntimeArgs) {
 }
 
 fn permission_args_parse(flags: &mut Flags, matches: PermissionArgs) {
-  if let Some(read_allowlist) = matches.allow_read {
-    if read_allowlist.is_empty() {
-      flags.allow_read = true;
-    } else {
-      flags.read_allowlist = read_allowlist;
-    }
-  }
-
-  if let Some(write_allowlist) = matches.allow_write {
-    if write_allowlist.is_empty() {
-      flags.allow_write = true;
-    } else {
-      flags.write_allowlist = write_allowlist;
-    }
-  }
+  flags.allow_read = matches.allow_read;
+  flags.allow_write = matches.allow_write;
 
   if let Some(net_allowlist) = matches.allow_net {
-    if net_allowlist.is_empty() {
-      flags.allow_net = true;
-    } else {
-      flags.net_allowlist =
-        crate::flags_allow_net::parse(net_allowlist).unwrap();
-      debug!("net allowlist: {:#?}", &flags.net_allowlist);
-    }
+    let net_allowlist = crate::flags_allow_net::parse(net_allowlist).unwrap();
+    flags.allow_net = Some(net_allowlist);
+
+    debug!("net allowlist: {:#?}", &flags.net_allowlist);
   }
 
   flags.allow_env = matches.allow_env;
@@ -1339,12 +1353,11 @@ fn permission_args_parse(flags: &mut Flags, matches: PermissionArgs) {
   flags.allow_hrtime = matches.allow_hrtime;
 
   if matches.allow_all {
-    flags.allow_read = true;
+    flags.allow_read = Some(vec![]);
     flags.allow_env = true;
-    flags.allow_net = true;
+    flags.allow_net = Some(vec![]);
     flags.allow_run = true;
-    flags.allow_read = true;
-    flags.allow_write = true;
+    flags.allow_write = Some(vec![]);
     flags.allow_plugin = true;
     flags.allow_hrtime = true;
   }
@@ -1512,7 +1525,7 @@ mod tests {
         subcommand: DenoSubcommand::Run {
           script: "script.ts".to_string(),
         },
-        allow_write: true,
+        allow_write: Some(vec![]),
         ..Flags::default()
       }
     );
@@ -1567,7 +1580,7 @@ mod tests {
           script: "gist.ts".to_string(),
         },
         argv: svec!["--title", "X"],
-        allow_net: true,
+        allow_net: Some(vec![]),
         ..Flags::default()
       }
     );
@@ -1582,11 +1595,11 @@ mod tests {
         subcommand: DenoSubcommand::Run {
           script: "gist.ts".to_string(),
         },
-        allow_net: true,
+        allow_net: Some(vec![]),
         allow_env: true,
         allow_run: true,
-        allow_read: true,
-        allow_write: true,
+        allow_read: Some(vec![]),
+        allow_write: Some(vec![]),
         allow_plugin: true,
         allow_hrtime: true,
         ..Flags::default()
@@ -1604,7 +1617,7 @@ mod tests {
         subcommand: DenoSubcommand::Run {
           script: "gist.ts".to_string(),
         },
-        allow_read: true,
+        allow_read: Some(vec![]),
         ..Flags::default()
       }
     );
@@ -1647,7 +1660,7 @@ mod tests {
           script: "script.ts".to_string(),
         },
         argv: svec!["--", "-D", "--allow-net"],
-        allow_write: true,
+        allow_write: Some(vec![]),
         ..Flags::default()
       }
     );
@@ -1958,11 +1971,11 @@ mod tests {
           code: "'console.log(\"hello\")'".to_string(),
           as_typescript: false,
         },
-        allow_net: true,
+        allow_net: Some(vec![]),
         allow_env: true,
         allow_run: true,
-        allow_read: true,
-        allow_write: true,
+        allow_read: Some(vec![]),
+        allow_write: Some(vec![]),
         allow_plugin: true,
         allow_hrtime: true,
         ..Flags::default()
@@ -1981,11 +1994,11 @@ mod tests {
           code: "1+2".to_string(),
           as_typescript: false,
         },
-        allow_net: true,
+        allow_net: Some(vec![]),
         allow_env: true,
         allow_run: true,
-        allow_read: true,
-        allow_write: true,
+        allow_read: Some(vec![]),
+        allow_write: Some(vec![]),
         allow_plugin: true,
         allow_hrtime: true,
         ..Flags::default()
@@ -2009,11 +2022,11 @@ mod tests {
           code: "'console.log(\"hello\")'".to_string(),
           as_typescript: true,
         },
-        allow_net: true,
+        allow_net: Some(vec![]),
         allow_env: true,
         allow_run: true,
-        allow_read: true,
-        allow_write: true,
+        allow_read: Some(vec![]),
+        allow_write: Some(vec![]),
         allow_plugin: true,
         allow_hrtime: true,
         ..Flags::default()
@@ -2046,11 +2059,11 @@ mod tests {
         v8_flags: svec!["--help", "--random-seed=1"],
         seed: Some(1),
         inspect: Some("127.0.0.1:9229".parse().unwrap()),
-        allow_net: true,
+        allow_net: Some(vec![]),
         allow_env: true,
         allow_run: true,
-        allow_read: true,
-        allow_write: true,
+        allow_read: Some(vec![]),
+        allow_write: Some(vec![]),
         allow_plugin: true,
         allow_hrtime: true,
         ..Flags::default()
@@ -2076,11 +2089,11 @@ mod tests {
           as_typescript: false,
         },
         argv: svec!["arg1", "arg2"],
-        allow_net: true,
+        allow_net: Some(vec![]),
         allow_env: true,
         allow_run: true,
-        allow_read: true,
-        allow_write: true,
+        allow_read: Some(vec![]),
+        allow_write: Some(vec![]),
         allow_plugin: true,
         allow_hrtime: true,
         ..Flags::default()
@@ -2096,11 +2109,11 @@ mod tests {
       Flags {
         repl: true,
         subcommand: DenoSubcommand::Repl,
-        allow_net: true,
+        allow_net: Some(vec![]),
         allow_env: true,
         allow_run: true,
-        allow_read: true,
-        allow_write: true,
+        allow_read: Some(vec![]),
+        allow_write: Some(vec![]),
         allow_plugin: true,
         allow_hrtime: true,
         ..Flags::default()
@@ -2130,11 +2143,11 @@ mod tests {
         v8_flags: svec!["--help", "--random-seed=1"],
         seed: Some(1),
         inspect: Some("127.0.0.1:9229".parse().unwrap()),
-        allow_net: true,
+        allow_net: Some(vec![]),
         allow_env: true,
         allow_run: true,
-        allow_read: true,
-        allow_write: true,
+        allow_read: Some(vec![]),
+        allow_write: Some(vec![]),
         allow_plugin: true,
         allow_hrtime: true,
         ..Flags::default()
@@ -2156,8 +2169,7 @@ mod tests {
     assert_eq!(
       r.unwrap(),
       Flags {
-        allow_read: false,
-        read_allowlist: vec![PathBuf::from("."), temp_dir],
+        allow_read: Some(vec![PathBuf::from("."), temp_dir]),
         subcommand: DenoSubcommand::Run {
           script: "script.ts".to_string(),
         },
@@ -2180,8 +2192,7 @@ mod tests {
     assert_eq!(
       r.unwrap(),
       Flags {
-        allow_write: false,
-        write_allowlist: vec![PathBuf::from("."), temp_dir],
+        allow_write: Some(vec![PathBuf::from("."), temp_dir]),
         subcommand: DenoSubcommand::Run {
           script: "script.ts".to_string(),
         },
@@ -2204,8 +2215,7 @@ mod tests {
         subcommand: DenoSubcommand::Run {
           script: "script.ts".to_string(),
         },
-        allow_net: false,
-        net_allowlist: svec!["127.0.0.1"],
+        allow_net: Some(svec!["127.0.0.1"]),
         ..Flags::default()
       }
     );
@@ -2244,7 +2254,7 @@ mod tests {
           source_file: "source.ts".to_string(),
           out_file: Some(PathBuf::from("bundle.js")),
         },
-        allow_write: true,
+        allow_write: Some(vec![]),
         no_remote: true,
         config_path: Some("tsconfig.json".to_owned()),
         ..Flags::default()
@@ -2263,7 +2273,7 @@ mod tests {
           source_file: "source.ts".to_string(),
           out_file: Some(PathBuf::from("bundle.js")),
         },
-        allow_write: true,
+        allow_write: Some(vec![]),
         ..Flags::default()
       }
     );
@@ -2546,8 +2556,8 @@ mod tests {
         v8_flags: svec!["--help", "--random-seed=1"],
         seed: Some(1),
         inspect: Some("127.0.0.1:9229".parse().unwrap()),
-        allow_net: true,
-        allow_read: true,
+        allow_net: Some(vec![]),
+        allow_read: Some(vec![]),
         ..Flags::default()
       }
     );
@@ -2634,7 +2644,7 @@ mod tests {
         subcommand: DenoSubcommand::Run {
           script: "script.ts".to_string(),
         },
-        allow_read: true,
+        allow_read: Some(vec![]),
         argv: svec!["--allow-net", "-r", "--help", "--foo", "bar"],
         ..Flags::default()
       }
@@ -2740,7 +2750,7 @@ mod tests {
         subcommand: DenoSubcommand::Run {
           script: "script.ts".to_string(),
         },
-        net_allowlist: svec![
+        allow_net: Some(svec![
           "deno.land",
           "0.0.0.0:8000",
           "127.0.0.1:8000",
@@ -2748,7 +2758,7 @@ mod tests {
           "0.0.0.0:4545",
           "127.0.0.1:4545",
           "localhost:4545"
-        ],
+        ]),
         ..Flags::default()
       }
     );
@@ -2768,7 +2778,7 @@ mod tests {
         subcommand: DenoSubcommand::Run {
           script: "script.ts".to_string(),
         },
-        net_allowlist: svec![
+        allow_net: Some(svec![
           "deno.land",
           "deno.land:80",
           "::",
@@ -2779,7 +2789,7 @@ mod tests {
           "127.0.0.1:5678",
           "localhost:5678",
           "[::1]:8080"
-        ],
+        ]),
         ..Flags::default()
       }
     );
@@ -2810,7 +2820,7 @@ mod tests {
   #[test]
   fn test_with_flags() {
     #[rustfmt::skip]
-    let r = flags_from_vec_safe(svec!["deno", "test", "--unstable", "--no-run", "--filter", "- foo", "--coverage", "--allow-net", "--allow-none", "dir1/", "dir2/", "--", "arg1", "arg2"]);
+    let r = flags_from_vec_safe(svec!["deno", "test", "--unstable", "--no-run", "--filter", "- foo", "--coverage=cov", "--allow-net", "--allow-none", "dir1/", "dir2/", "--", "arg1", "arg2"]);
     assert_eq!(
       r.unwrap(),
       Flags {
@@ -2823,8 +2833,8 @@ mod tests {
           include: Some(svec!["dir1/", "dir2/"]),
         },
         unstable: true,
-        coverage: true,
-        allow_net: true,
+        coverage_dir: Some("cov".to_string()),
+        allow_net: Some(vec![]),
         argv: svec!["arg1", "arg2"],
         ..Flags::default()
       }
