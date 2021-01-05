@@ -1254,12 +1254,14 @@ fn test_parse(flags: &mut Flags, matches: TestSubcommand, quiet: bool) {
   permission_args_parse(flags, matches.permissions);
 
   flags.coverage_dir = matches.coverage.map(|cov| {
-    cov.unwrap_or(TempDir::new()
-      .unwrap()
-      .into_path()
-      .to_str()
-      .unwrap()
-      .to_string())
+    cov.unwrap_or_else(|| {
+      TempDir::new()
+        .unwrap()
+        .into_path()
+        .to_str()
+        .unwrap()
+        .to_string()
+    })
   });
 
   if !matches.script_arg.is_empty() {
@@ -1344,7 +1346,7 @@ fn permission_args_parse(flags: &mut Flags, matches: PermissionArgs) {
     let net_allowlist = crate::flags_allow_net::parse(net_allowlist).unwrap();
     flags.allow_net = Some(net_allowlist);
 
-    debug!("net allowlist: {:#?}", &flags.net_allowlist);
+    debug!("net allowlist: {:#?}", &flags.allow_net);
   }
 
   flags.allow_env = matches.allow_env;

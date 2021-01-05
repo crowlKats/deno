@@ -413,7 +413,7 @@ impl lspower::LanguageServer for LanguageServer {
 
     let version = format!(
       "{} ({}, {})",
-      crate::version::deno(),
+      *crate::version::DENO,
       env!("PROFILE"),
       env!("TARGET")
     );
@@ -1022,9 +1022,9 @@ impl LanguageServer {
       let file_cache = self.file_cache.lock().unwrap();
       Some(format!(
         r#"# Deno Language Server Status
-  
+
   - Documents in memory: {}
-  
+
   "#,
         file_cache.len()
       ))
