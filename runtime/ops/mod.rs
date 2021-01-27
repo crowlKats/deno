@@ -16,6 +16,7 @@ pub mod permissions;
 pub mod plugin;
 pub mod process;
 pub mod runtime;
+pub mod serial;
 pub mod signal;
 pub mod timers;
 pub mod tls;

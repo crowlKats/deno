@@ -252,6 +252,7 @@ impl WebWorker {
         ops::plugin::init(js_runtime);
         ops::process::init(js_runtime);
         ops::crypto::init(js_runtime, options.seed);
+        ops::serial::init(js_runtime);
         ops::signal::init(js_runtime);
         ops::tls::init(js_runtime);
         ops::tty::init(js_runtime);

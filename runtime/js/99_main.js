@@ -27,6 +27,7 @@ delete Object.prototype.__proto__;
   const streams = window.__bootstrap.streams;
   const fileReader = window.__bootstrap.fileReader;
   const webSocket = window.__bootstrap.webSocket;
+  const webSerial = window.__bootstrap.webSerial;
   const fetch = window.__bootstrap.fetch;
   const prompt = window.__bootstrap.prompt;
   const denoNs = window.__bootstrap.denoNs;
@@ -195,6 +196,13 @@ delete Object.prototype.__proto__;
     core.registerErrorClass("URIError", URIError);
   }
 
+  const windowNavigator = {
+    serial: util.nonEnumerable(webSerial.serial),
+  };
+  const workerNavigator = {
+    serial: util.nonEnumerable(webSerial.serial),
+  };
+
   // https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope
   const windowOrWorkerGlobalScope = {
     Blob: util.nonEnumerable(fetch.Blob),
@@ -269,6 +277,7 @@ delete Object.prototype.__proto__;
     alert: util.writable(prompt.alert),
     confirm: util.writable(prompt.confirm),
     prompt: util.writable(prompt.prompt),
+    navigator: windowNavigator,
   };
 
   const workerRuntimeGlobalProperties = {
@@ -284,6 +293,7 @@ delete Object.prototype.__proto__;
     close: util.nonEnumerable(workerClose),
     postMessage: util.writable(postMessage),
     workerMessageRecvCallback: util.nonEnumerable(workerMessageRecvCallback),
+    navigator: workerNavigator,
   };
 
   let hasBootstrapped = false;
