@@ -197,10 +197,10 @@ delete Object.prototype.__proto__;
   }
 
   const windowNavigator = {
-    serial: util.nonEnumerable(webSerial.serial),
+    serial: util.nonEnumerable(webSerial.windowSerial),
   };
   const workerNavigator = {
-    serial: util.nonEnumerable(webSerial.serial),
+    serial: util.nonEnumerable(webSerial.workerSerial),
   };
 
   // https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope

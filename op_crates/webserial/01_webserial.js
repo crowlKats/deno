@@ -15,13 +15,13 @@
     return promise;
   }
 
-  class WebSerial extends EventTarget {
-    #availablePorts = [];
+  const availablePorts = [];
 
+  class WindowSerial extends EventTarget {
     async getPorts() {
       // TODO check perms
 
-      return this.#availablePorts;
+      return availablePorts;
     }
 
     async requestPort(options) {
@@ -38,8 +38,16 @@
       const device = undefined; // TODO pick port
 
       const port = new SerialPort(device);
-      this.#availablePorts.push(port);
+      availablePorts.push(port);
       return port;
+    }
+  }
+
+  class WorkerSerial extends EventTarget {
+    async getPorts() {
+      // TODO check perms
+
+      return availablePorts;
     }
   }
 
@@ -187,5 +195,8 @@
     }
   }
 
-  window.__bootstrap.webSerial = { serial: new WebSerial() };
+  window.__bootstrap.webSerial = {
+    windowSerial: new WindowSerial(),
+    workerSerial: new WorkerSerial(),
+  };
 })(this);
