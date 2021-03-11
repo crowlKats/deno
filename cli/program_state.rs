@@ -1,11 +1,10 @@
-// Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
 use crate::deno_dir;
 use crate::file_fetcher::CacheSetting;
 use crate::file_fetcher::FileFetcher;
 use crate::flags;
 use crate::http_cache;
-use crate::http_util;
 use crate::import_map::ImportMap;
 use crate::lockfile::Lockfile;
 use crate::module_graph::CheckOptions;
@@ -14,17 +13,21 @@ use crate::module_graph::TranspileOptions;
 use crate::module_graph::TypeLib;
 use crate::source_maps::SourceMapGetter;
 use crate::specifier_handler::FetchHandler;
+use crate::version;
 use deno_runtime::inspector::InspectorServer;
 use deno_runtime::permissions::Permissions;
 
 use deno_core::error::anyhow;
 use deno_core::error::get_custom_error_class;
 use deno_core::error::AnyError;
+use deno_core::error::Context;
+use deno_core::resolve_url;
 use deno_core::url::Url;
 use deno_core::ModuleSource;
 use deno_core::ModuleSpecifier;
 use std::collections::HashMap;
 use std::env;
+use std::fs::read;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -50,15 +53,20 @@ pub struct ProgramState {
   pub lockfile: Option<Arc<Mutex<Lockfile>>>,
   pub maybe_import_map: Option<ImportMap>,
   pub maybe_inspector_server: Option<Arc<InspectorServer>>,
+  pub ca_data: Option<Vec<u8>>,
 }
 
 impl ProgramState {
-  pub fn new(flags: flags::Flags) -> Result<Arc<Self>, AnyError> {
+  pub async fn build(flags: flags::Flags) -> Result<Arc<Self>, AnyError> {
     let custom_root = env::var("DENO_DIR").map(String::into).ok();
     let dir = deno_dir::DenoDir::new(custom_root)?;
     let deps_cache_location = dir.root.join("deps");
     let http_cache = http_cache::HttpCache::new(&deps_cache_location);
     let ca_file = flags.ca_file.clone().or_else(|| env::var("DENO_CERT").ok());
+    let ca_data = match &ca_file {
+      Some(ca_file) => Some(read(ca_file).context("Failed to open ca file")?),
+      None => None,
+    };
 
     let cache_usage = if flags.cached_only {
       CacheSetting::Only
@@ -74,7 +82,7 @@ impl ProgramState {
       http_cache,
       cache_usage,
       !flags.no_remote,
-      ca_file.as_deref(),
+      ca_data.clone(),
     )?;
 
     let lockfile = if let Some(filename) = &flags.lock {
@@ -87,11 +95,17 @@ impl ProgramState {
     let maybe_import_map: Option<ImportMap> =
       match flags.import_map_path.as_ref() {
         None => None,
-        Some(file_path) => {
-          if !flags.unstable {
-            exit_unstable("--import-map")
-          }
-          Some(ImportMap::load(file_path)?)
+        Some(import_map_url) => {
+          let import_map_specifier =
+            deno_core::resolve_url_or_path(&import_map_url).context(
+              format!("Bad URL (\"{}\") for import map.", import_map_url),
+            )?;
+          let file = file_fetcher
+            .fetch(&import_map_specifier, &Permissions::allow_all())
+            .await?;
+          let import_map =
+            ImportMap::from_json(import_map_specifier.as_str(), &file.source)?;
+          Some(import_map)
         }
       };
 
@@ -99,7 +113,7 @@ impl ProgramState {
     let maybe_inspector_server = match maybe_inspect_host {
       Some(host) => Some(Arc::new(InspectorServer::new(
         host,
-        http_util::get_user_agent(),
+        version::get_user_agent(),
       ))),
       None => None,
     };
@@ -118,6 +132,7 @@ impl ProgramState {
       lockfile,
       maybe_import_map,
       maybe_inspector_server,
+      ca_data,
     };
     Ok(Arc::new(program_state))
   }
@@ -244,7 +259,7 @@ impl ProgramState {
     match url.scheme() {
       // we should only be looking for emits for schemes that denote external
       // modules, which the disk_cache supports
-      "wasm" | "file" | "http" | "https" => (),
+      "wasm" | "file" | "http" | "https" | "data" => (),
       _ => {
         return None;
       }
@@ -268,48 +283,18 @@ impl ProgramState {
       None
     }
   }
-
-  #[cfg(test)]
-  pub fn mock(
-    argv: Vec<String>,
-    maybe_flags: Option<flags::Flags>,
-  ) -> Arc<ProgramState> {
-    ProgramState::new(flags::Flags {
-      argv,
-      ..maybe_flags.unwrap_or_default()
-    })
-    .unwrap()
-  }
 }
 
 // TODO(@kitsonk) this is only temporary, but should be refactored to somewhere
 // else, like a refactored file_fetcher.
 impl SourceMapGetter for ProgramState {
   fn get_source_map(&self, file_name: &str) -> Option<Vec<u8>> {
-    if let Ok(specifier) = ModuleSpecifier::resolve_url(file_name) {
-      if let Some((code, maybe_map)) = self.get_emit(&specifier.as_url()) {
-        if maybe_map.is_some() {
-          maybe_map
-        } else {
-          let code = String::from_utf8(code).unwrap();
-          let lines: Vec<&str> = code.split('\n').collect();
-          if let Some(last_line) = lines.last() {
-            if last_line
-              .starts_with("//# sourceMappingURL=data:application/json;base64,")
-            {
-              let input = last_line.trim_start_matches(
-                "//# sourceMappingURL=data:application/json;base64,",
-              );
-              let decoded_map = base64::decode(input)
-                .expect("Unable to decode source map from emitted file.");
-              Some(decoded_map)
-            } else {
-              None
-            }
-          } else {
-            None
-          }
-        }
+    if let Ok(specifier) = resolve_url(file_name) {
+      if let Some((code, maybe_map)) = self.get_emit(&specifier) {
+        let code = String::from_utf8(code).unwrap();
+        source_map_from_code(code).or(maybe_map)
+      } else if let Ok(source) = self.load(specifier, None) {
+        source_map_from_code(source.code)
       } else {
         None
       }
@@ -323,7 +308,7 @@ impl SourceMapGetter for ProgramState {
     file_name: &str,
     line_number: usize,
   ) -> Option<String> {
-    if let Ok(specifier) = ModuleSpecifier::resolve_url(file_name) {
+    if let Ok(specifier) = resolve_url(file_name) {
       self.file_fetcher.get_source(&specifier).map(|out| {
         // Do NOT use .lines(): it skips the terminating empty line.
         // (due to internally using .split_terminator() instead of .split())
@@ -337,8 +322,22 @@ impl SourceMapGetter for ProgramState {
   }
 }
 
-#[test]
-fn thread_safe() {
-  fn f<S: Send + Sync>(_: S) {}
-  f(ProgramState::mock(vec![], None));
+fn source_map_from_code(code: String) -> Option<Vec<u8>> {
+  let lines: Vec<&str> = code.split('\n').collect();
+  if let Some(last_line) = lines.last() {
+    if last_line
+      .starts_with("//# sourceMappingURL=data:application/json;base64,")
+    {
+      let input = last_line.trim_start_matches(
+        "//# sourceMappingURL=data:application/json;base64,",
+      );
+      let decoded_map = base64::decode(input)
+        .expect("Unable to decode source map from emitted file.");
+      Some(decoded_map)
+    } else {
+      None
+    }
+  } else {
+    None
+  }
 }

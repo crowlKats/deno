@@ -1,4 +1,4 @@
-// Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
 use crate::diagnostics::Diagnostics;
 use crate::media_type::MediaType;
@@ -11,6 +11,8 @@ use deno_core::error::bail;
 use deno_core::error::AnyError;
 use deno_core::error::Context;
 use deno_core::json_op_sync;
+use deno_core::resolve_url_or_path;
+use deno_core::serde::Deserialize;
 use deno_core::serde_json;
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
@@ -19,37 +21,63 @@ use deno_core::ModuleSpecifier;
 use deno_core::OpFn;
 use deno_core::RuntimeOptions;
 use deno_core::Snapshot;
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// Provide static assets that are not preloaded in the compiler snapshot.
+// Declaration files
+
+pub static DENO_NS_LIB: &str = include_str!("dts/lib.deno.ns.d.ts");
+pub static DENO_WEB_LIB: &str = include_str!(env!("DENO_WEB_LIB_PATH"));
+pub static DENO_FETCH_LIB: &str = include_str!(env!("DENO_FETCH_LIB_PATH"));
+pub static DENO_WEBGPU_LIB: &str = include_str!(env!("DENO_WEBGPU_LIB_PATH"));
+pub static DENO_WEBSOCKET_LIB: &str =
+  include_str!(env!("DENO_WEBSOCKET_LIB_PATH"));
+pub static SHARED_GLOBALS_LIB: &str =
+  include_str!("dts/lib.deno.shared_globals.d.ts");
+pub static WINDOW_LIB: &str = include_str!("dts/lib.deno.window.d.ts");
+pub static UNSTABLE_NS_LIB: &str = include_str!("dts/lib.deno.unstable.d.ts");
+
+pub static COMPILER_SNAPSHOT: &[u8] =
+  include_bytes!(concat!(env!("OUT_DIR"), "/COMPILER_SNAPSHOT.bin"));
+
+pub fn compiler_snapshot() -> Snapshot {
+  Snapshot::Static(COMPILER_SNAPSHOT)
+}
+
+macro_rules! inc {
+  ($e:expr) => {
+    include_str!(concat!("dts/", $e))
+  };
+}
+
+lazy_static! {
+  /// Contains static assets that are not preloaded in the compiler snapshot.
+  pub(crate) static ref STATIC_ASSETS: HashMap<&'static str, &'static str> = (&[
+    ("lib.dom.asynciterable.d.ts", inc!("lib.dom.asynciterable.d.ts")),
+    ("lib.dom.d.ts", inc!("lib.dom.d.ts")),
+    ("lib.dom.iterable.d.ts", inc!("lib.dom.iterable.d.ts")),
+    ("lib.es6.d.ts", inc!("lib.es6.d.ts")),
+    ("lib.es2016.full.d.ts", inc!("lib.es2016.full.d.ts")),
+    ("lib.es2017.full.d.ts", inc!("lib.es2017.full.d.ts")),
+    ("lib.es2018.full.d.ts", inc!("lib.es2018.full.d.ts")),
+    ("lib.es2019.full.d.ts", inc!("lib.es2019.full.d.ts")),
+    ("lib.es2020.full.d.ts", inc!("lib.es2020.full.d.ts")),
+    ("lib.esnext.full.d.ts", inc!("lib.esnext.full.d.ts")),
+    ("lib.scripthost.d.ts", inc!("lib.scripthost.d.ts")),
+    ("lib.webworker.d.ts", inc!("lib.webworker.d.ts")),
+    ("lib.webworker.importscripts.d.ts", inc!("lib.webworker.importscripts.d.ts")),
+    ("lib.webworker.iterable.d.ts", inc!("lib.webworker.iterable.d.ts")),
+  ])
+  .iter()
+  .cloned()
+  .collect();
+}
+
+/// Retrieve a static asset that are included in the binary.
 pub fn get_asset(asset: &str) -> Option<&'static str> {
-  macro_rules! inc {
-    ($e:expr) => {
-      Some(include_str!(concat!("dts/", $e)))
-    };
-  }
-  match asset {
-    "lib.dom.d.ts" => inc!("lib.dom.d.ts"),
-    "lib.dom.iterable.d.ts" => inc!("lib.dom.iterable.d.ts"),
-    "lib.es6.d.ts" => inc!("lib.es6.d.ts"),
-    "lib.es2016.full.d.ts" => inc!("lib.es2016.full.d.ts"),
-    "lib.es2017.full.d.ts" => inc!("lib.es2017.full.d.ts"),
-    "lib.es2018.full.d.ts" => inc!("lib.es2018.full.d.ts"),
-    "lib.es2019.full.d.ts" => inc!("lib.es2019.full.d.ts"),
-    "lib.es2020.full.d.ts" => inc!("lib.es2020.full.d.ts"),
-    "lib.esnext.full.d.ts" => inc!("lib.esnext.full.d.ts"),
-    "lib.scripthost.d.ts" => inc!("lib.scripthost.d.ts"),
-    "lib.webworker.d.ts" => inc!("lib.webworker.d.ts"),
-    "lib.webworker.importscripts.d.ts" => {
-      inc!("lib.webworker.importscripts.d.ts")
-    }
-    "lib.webworker.iterable.d.ts" => inc!("lib.webworker.iterable.d.ts"),
-    _ => None,
-  }
+  STATIC_ASSETS.get(asset).map(|s| s.to_owned())
 }
 
 fn get_maybe_hash(
@@ -65,19 +93,31 @@ fn get_maybe_hash(
   }
 }
 
+fn hash_data_url(
+  specifier: &ModuleSpecifier,
+  media_type: &MediaType,
+) -> String {
+  assert_eq!(
+    specifier.scheme(),
+    "data",
+    "Specifier must be a data: specifier."
+  );
+  let hash = crate::checksum::gen(&[specifier.path().as_bytes()]);
+  format!("data:///{}{}", hash, media_type.as_ts_extension())
+}
+
 /// tsc only supports `.ts`, `.tsx`, `.d.ts`, `.js`, or `.jsx` as root modules
 /// and so we have to detect the apparent media type based on extensions it
 /// supports.
 fn get_tsc_media_type(specifier: &ModuleSpecifier) -> MediaType {
-  let url = specifier.as_url();
-  let path = if url.scheme() == "file" {
-    if let Ok(path) = url.to_file_path() {
+  let path = if specifier.scheme() == "file" {
+    if let Ok(path) = specifier.to_file_path() {
       path
     } else {
-      PathBuf::from(url.path())
+      PathBuf::from(specifier.path())
     }
   } else {
-    PathBuf::from(url.path())
+    PathBuf::from(specifier.path())
   };
   match path.extension() {
     None => MediaType::Unknown,
@@ -135,7 +175,9 @@ pub struct Response {
   pub stats: Stats,
 }
 
+#[derive(Debug)]
 struct State {
+  data_url_map: HashMap<String, ModuleSpecifier>,
   hash_data: Vec<Vec<u8>>,
   emitted_files: Vec<EmittedFile>,
   graph: Arc<Mutex<Graph>>,
@@ -150,10 +192,12 @@ impl State {
     hash_data: Vec<Vec<u8>>,
     maybe_tsbuildinfo: Option<String>,
     root_map: HashMap<String, ModuleSpecifier>,
+    data_url_map: HashMap<String, ModuleSpecifier>,
   ) -> Self {
     State {
+      data_url_map,
       hash_data,
-      emitted_files: Vec::new(),
+      emitted_files: Default::default(),
       graph,
       maybe_tsbuildinfo,
       maybe_response: None,
@@ -214,10 +258,12 @@ fn emit(state: &mut State, args: Value) -> Result<Value, AnyError> {
         let specifiers = specifiers
           .iter()
           .map(|s| {
-            if let Some(remapped_specifier) = state.root_map.get(s) {
+            if let Some(data_specifier) = state.data_url_map.get(s) {
+              data_specifier.clone()
+            } else if let Some(remapped_specifier) = state.root_map.get(s) {
               remapped_specifier.clone()
             } else {
-              ModuleSpecifier::resolve_url_or_path(s).unwrap()
+              resolve_url_or_path(s).unwrap()
             }
           })
           .collect();
@@ -241,7 +287,7 @@ struct LoadArgs {
 fn load(state: &mut State, args: Value) -> Result<Value, AnyError> {
   let v: LoadArgs = serde_json::from_value(args)
     .context("Invalid request from JavaScript for \"op_load\".")?;
-  let specifier = ModuleSpecifier::resolve_url_or_path(&v.specifier)
+  let specifier = resolve_url_or_path(&v.specifier)
     .context("Error converting a string module specifier for \"op_load\".")?;
   let mut hash: Option<String> = None;
   let mut media_type = MediaType::Unknown;
@@ -249,24 +295,27 @@ fn load(state: &mut State, args: Value) -> Result<Value, AnyError> {
     state.maybe_tsbuildinfo.clone()
   // in certain situations we return a "blank" module to tsc and we need to
   // handle the request for that module here.
-  } else if &v.specifier == "deno:///none.d.ts" {
+  } else if &v.specifier == "deno:///missing_dependency.d.ts" {
     hash = Some("1".to_string());
-    media_type = MediaType::TypeScript;
-    Some("declare var a: any;\nexport = a;\n".to_string())
+    media_type = MediaType::Dts;
+    Some("declare const __: any;\nexport = __;\n".to_string())
   } else if v.specifier.starts_with("asset:///") {
     let name = v.specifier.replace("asset:///", "");
-    let maybe_source = get_asset(&name).map(|s| s.to_string());
+    let maybe_source = get_asset(&name).map(String::from);
     hash = get_maybe_hash(&maybe_source, &state.hash_data);
     media_type = MediaType::from(&v.specifier);
     maybe_source
   } else {
     let graph = state.graph.lock().unwrap();
-    let specifier =
-      if let Some(remapped_specifier) = state.root_map.get(&v.specifier) {
-        remapped_specifier.clone()
-      } else {
-        specifier
-      };
+    let specifier = if let Some(data_specifier) =
+      state.data_url_map.get(&v.specifier)
+    {
+      data_specifier.clone()
+    } else if let Some(remapped_specifier) = state.root_map.get(&v.specifier) {
+      remapped_specifier.clone()
+    } else {
+      specifier
+    };
     let maybe_source = graph.get_source(&specifier);
     media_type = if let Some(media_type) = graph.get_media_type(&specifier) {
       media_type
@@ -296,10 +345,12 @@ fn resolve(state: &mut State, args: Value) -> Result<Value, AnyError> {
   let v: ResolveArgs = serde_json::from_value(args)
     .context("Invalid request from JavaScript for \"op_resolve\".")?;
   let mut resolved: Vec<(String, String)> = Vec::new();
-  let referrer = if let Some(remapped_base) = state.root_map.get(&v.base) {
+  let referrer = if let Some(data_specifier) = state.data_url_map.get(&v.base) {
+    data_specifier.clone()
+  } else if let Some(remapped_base) = state.root_map.get(&v.base) {
     remapped_base.clone()
   } else {
-    ModuleSpecifier::resolve_url_or_path(&v.base).context(
+    resolve_url_or_path(&v.base).context(
       "Error converting a string module specifier for \"op_resolve\".",
     )?
   };
@@ -323,16 +374,29 @@ fn resolve(state: &mut State, args: Value) -> Result<Value, AnyError> {
               resolved_specifier
             )
           };
+          let resolved_specifier_str = if resolved_specifier.scheme() == "data"
+          {
+            let specifier_str = hash_data_url(&resolved_specifier, &media_type);
+            state
+              .data_url_map
+              .insert(specifier_str.clone(), resolved_specifier);
+            specifier_str
+          } else {
+            resolved_specifier.to_string()
+          };
           resolved.push((
-            resolved_specifier.to_string(),
-            media_type.as_ts_extension(),
+            resolved_specifier_str,
+            media_type.as_ts_extension().into(),
           ));
         }
         // in certain situations, like certain dynamic imports, we won't have
         // the source file in the graph, so we will return a fake module to
         // make tsc happy.
         Err(_) => {
-          resolved.push(("deno:///none.d.ts".to_string(), ".d.ts".to_string()));
+          resolved.push((
+            "deno:///missing_dependency.d.ts".to_string(),
+            ".d.ts".to_string(),
+          ));
         }
       }
     }
@@ -357,12 +421,9 @@ fn respond(state: &mut State, args: Value) -> Result<Value, AnyError> {
 /// Execute a request on the supplied snapshot, returning a response which
 /// contains information, like any emitted files, diagnostics, statistics and
 /// optionally an updated TypeScript build info.
-pub fn exec(
-  snapshot: Snapshot,
-  request: Request,
-) -> Result<Response, AnyError> {
+pub fn exec(request: Request) -> Result<Response, AnyError> {
   let mut runtime = JsRuntime::new(RuntimeOptions {
-    startup_snapshot: Some(snapshot),
+    startup_snapshot: Some(compiler_snapshot()),
     ..Default::default()
   });
   // tsc cannot handle root specifiers that don't have one of the "acceptable"
@@ -370,17 +431,24 @@ pub fn exec(
   // extensions and remap any that are unacceptable to tsc and add them to the
   // op state so when requested, we can remap to the original specifier.
   let mut root_map = HashMap::new();
+  let mut data_url_map = HashMap::new();
   let root_names: Vec<String> = request
     .root_names
     .iter()
     .map(|(s, mt)| {
-      let ext_media_type = get_tsc_media_type(s);
-      if mt != &ext_media_type {
-        let new_specifier = format!("{}{}", s, mt.as_ts_extension());
-        root_map.insert(new_specifier.clone(), s.clone());
-        new_specifier
+      if s.scheme() == "data" {
+        let specifier_str = hash_data_url(s, mt);
+        data_url_map.insert(specifier_str.clone(), s.clone());
+        specifier_str
       } else {
-        s.as_str().to_owned()
+        let ext_media_type = get_tsc_media_type(s);
+        if mt != &ext_media_type {
+          let new_specifier = format!("{}{}", s, mt.as_ts_extension());
+          root_map.insert(new_specifier.clone(), s.clone());
+          new_specifier
+        } else {
+          s.as_str().to_owned()
+        }
       }
     })
     .collect();
@@ -393,6 +461,7 @@ pub fn exec(
       request.hash_data.clone(),
       request.maybe_tsbuildinfo.clone(),
       root_map,
+      data_url_map,
     ));
   }
 
@@ -442,7 +511,6 @@ mod tests {
   use super::*;
   use crate::diagnostics::Diagnostic;
   use crate::diagnostics::DiagnosticCategory;
-  use crate::js;
   use crate::module_graph::tests::MockSpecifierHandler;
   use crate::module_graph::GraphBuilder;
   use crate::tsc_config::TsConfig;
@@ -455,9 +523,8 @@ mod tests {
     maybe_hash_data: Option<Vec<Vec<u8>>>,
     maybe_tsbuildinfo: Option<String>,
   ) -> State {
-    let specifier = maybe_specifier.unwrap_or_else(|| {
-      ModuleSpecifier::resolve_url_or_path("file:///main.ts").unwrap()
-    });
+    let specifier = maybe_specifier
+      .unwrap_or_else(|| resolve_url_or_path("file:///main.ts").unwrap());
     let hash_data = maybe_hash_data.unwrap_or_else(|| vec![b"".to_vec()]);
     let c = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let fixtures = c.join("tests/tsc2");
@@ -471,7 +538,13 @@ mod tests {
       .await
       .expect("module not inserted");
     let graph = Arc::new(Mutex::new(builder.get_graph()));
-    State::new(graph, hash_data, maybe_tsbuildinfo, HashMap::new())
+    State::new(
+      graph,
+      hash_data,
+      maybe_tsbuildinfo,
+      HashMap::new(),
+      HashMap::new(),
+    )
   }
 
   async fn test_exec(
@@ -512,7 +585,26 @@ mod tests {
       maybe_tsbuildinfo: None,
       root_names: vec![(specifier.clone(), MediaType::TypeScript)],
     };
-    exec(js::compiler_isolate_init(), request)
+    exec(request)
+  }
+
+  #[test]
+  fn test_compiler_snapshot() {
+    let mut js_runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions {
+      startup_snapshot: Some(compiler_snapshot()),
+      ..Default::default()
+    });
+    js_runtime
+      .execute(
+        "<anon>",
+        r#"
+      if (!(startup)) {
+          throw Error("bad");
+        }
+        console.log(`ts version: ${ts.version}`);
+      "#,
+      )
+      .unwrap();
   }
 
   #[tokio::test]
@@ -525,6 +617,15 @@ mod tests {
       actual,
       json!({"hash": "ae92df8f104748768838916857a1623b6a3c593110131b0a00f81ad9dac16511"})
     );
+  }
+
+  #[test]
+  fn test_hash_data_url() {
+    let specifier = deno_core::resolve_url(
+      "data:application/javascript,console.log(\"Hello%20Deno\");",
+    )
+    .unwrap();
+    assert_eq!(hash_data_url(&specifier, &MediaType::JavaScript), "data:///d300ea0796bd72b08df10348e0b70514c021f2e45bfe59cec24e12e97cd79c58.js");
   }
 
   #[test]
@@ -543,7 +644,7 @@ mod tests {
       ("file:///.tsbuildinfo", MediaType::Unknown),
     ];
     for (specifier, media_type) in fixtures {
-      let specifier = ModuleSpecifier::resolve_url_or_path(specifier).unwrap();
+      let specifier = resolve_url_or_path(specifier).unwrap();
       assert_eq!(get_tsc_media_type(&specifier), media_type);
     }
   }
@@ -567,7 +668,7 @@ mod tests {
       state.emitted_files[0],
       EmittedFile {
         data: "some file content".to_string(),
-        maybe_specifiers: Some(vec![ModuleSpecifier::resolve_url_or_path(
+        maybe_specifiers: Some(vec![resolve_url_or_path(
           "file:///some/file.ts"
         )
         .unwrap()]),
@@ -598,10 +699,7 @@ mod tests {
   #[tokio::test]
   async fn test_load() {
     let mut state = setup(
-      Some(
-        ModuleSpecifier::resolve_url_or_path("https://deno.land/x/mod.ts")
-          .unwrap(),
-      ),
+      Some(resolve_url_or_path("https://deno.land/x/mod.ts").unwrap()),
       None,
       Some("some content".to_string()),
     )
@@ -632,10 +730,7 @@ mod tests {
   #[tokio::test]
   async fn test_load_asset() {
     let mut state = setup(
-      Some(
-        ModuleSpecifier::resolve_url_or_path("https://deno.land/x/mod.ts")
-          .unwrap(),
-      ),
+      Some(resolve_url_or_path("https://deno.land/x/mod.ts").unwrap()),
       None,
       Some("some content".to_string()),
     )
@@ -654,10 +749,7 @@ mod tests {
   #[tokio::test]
   async fn test_load_tsbuildinfo() {
     let mut state = setup(
-      Some(
-        ModuleSpecifier::resolve_url_or_path("https://deno.land/x/mod.ts")
-          .unwrap(),
-      ),
+      Some(resolve_url_or_path("https://deno.land/x/mod.ts").unwrap()),
       None,
       Some("some content".to_string()),
     )
@@ -696,10 +788,7 @@ mod tests {
   #[tokio::test]
   async fn test_resolve() {
     let mut state = setup(
-      Some(
-        ModuleSpecifier::resolve_url_or_path("https://deno.land/x/a.ts")
-          .unwrap(),
-      ),
+      Some(resolve_url_or_path("https://deno.land/x/a.ts").unwrap()),
       None,
       None,
     )
@@ -715,10 +804,7 @@ mod tests {
   #[tokio::test]
   async fn test_resolve_empty() {
     let mut state = setup(
-      Some(
-        ModuleSpecifier::resolve_url_or_path("https://deno.land/x/a.ts")
-          .unwrap(),
-      ),
+      Some(resolve_url_or_path("https://deno.land/x/a.ts").unwrap()),
       None,
       None,
     )
@@ -727,7 +813,10 @@ mod tests {
       &mut state,
       json!({ "base": "https://deno.land/x/a.ts", "specifiers": [ "./bad.ts" ]}),
     ).expect("should have not errored");
-    assert_eq!(actual, json!([["deno:///none.d.ts", ".d.ts"]]));
+    assert_eq!(
+      actual,
+      json!([["deno:///missing_dependency.d.ts", ".d.ts"]])
+    );
   }
 
   #[tokio::test]
@@ -772,8 +861,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_exec_basic() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("https://deno.land/x/a.ts").unwrap();
+    let specifier = resolve_url_or_path("https://deno.land/x/a.ts").unwrap();
     let actual = test_exec(&specifier)
       .await
       .expect("exec should not have errored");
@@ -785,8 +873,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_exec_reexport_dts() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///reexports.ts").unwrap();
+    let specifier = resolve_url_or_path("file:///reexports.ts").unwrap();
     let actual = test_exec(&specifier)
       .await
       .expect("exec should not have errored");
@@ -798,8 +885,7 @@ mod tests {
 
   #[tokio::test]
   async fn fix_lib_ref() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///libref.ts").unwrap();
+    let specifier = resolve_url_or_path("file:///libref.ts").unwrap();
     let actual = test_exec(&specifier)
       .await
       .expect("exec should not have errored");

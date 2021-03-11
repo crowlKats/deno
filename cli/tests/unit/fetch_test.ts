@@ -1,10 +1,11 @@
-// Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 import {
   assert,
   assertEquals,
   assertThrows,
   assertThrowsAsync,
   fail,
+  unimplemented,
   unitTest,
 } from "./test_util.ts";
 
@@ -20,12 +21,37 @@ unitTest({ perms: { net: true } }, async function fetchProtocolError(): Promise<
   );
 });
 
+function findClosedPortInRange(
+  minPort: number,
+  maxPort: number,
+): number | never {
+  let port = minPort;
+
+  // If we hit the return statement of this loop
+  // that means that we did not throw an
+  // AddrInUse error when we executed Deno.listen.
+  while (port < maxPort) {
+    try {
+      const listener = Deno.listen({ port });
+      listener.close();
+      return port;
+    } catch (e) {
+      port++;
+    }
+  }
+
+  unimplemented(
+    `No available ports between ${minPort} and ${maxPort} to test fetch`,
+  );
+}
+
 unitTest(
   { perms: { net: true } },
   async function fetchConnectionError(): Promise<void> {
+    const port = findClosedPortInRange(4000, 9999);
     await assertThrowsAsync(
       async (): Promise<void> => {
-        await fetch("http://localhost:4000");
+        await fetch(`http://localhost:${port}`);
       },
       TypeError,
       "error trying to connect",
@@ -108,10 +134,9 @@ unitTest({ perms: { net: true } }, async function fetchBodyUsed(): Promise<
 > {
   const response = await fetch("http://localhost:4545/cli/tests/fixture.json");
   assertEquals(response.bodyUsed, false);
-  assertThrows((): void => {
-    // deno-lint-ignore no-explicit-any
-    (response as any).bodyUsed = true;
-  });
+  // deno-lint-ignore no-explicit-any
+  (response as any).bodyUsed = true;
+  assertEquals(response.bodyUsed, false);
   await response.blob();
   assertEquals(response.bodyUsed, true);
 });
@@ -219,17 +244,6 @@ unitTest({ perms: { net: true } }, async function responseClone(): Promise<
   for (let i = 0; i < u8a.byteLength; i++) {
     assertEquals(u8a[i], u8a1[i]);
   }
-});
-
-unitTest({ perms: { net: true } }, async function fetchEmptyInvalid(): Promise<
-  void
-> {
-  await assertThrowsAsync(
-    async () => {
-      await fetch("");
-    },
-    URIError,
-  );
 });
 
 unitTest(
@@ -919,8 +933,14 @@ unitTest(
   },
 );
 
+// FIXME(bartlomieju): for reasons unknown after working for
+// a few months without a problem; this test started failing
+// consistently on Windows CI with following error:
+// TypeError: error sending request for url (http://localhost:4545/echo_server):
+// connection error: An established connection was aborted by
+// the software in your host machine. (os error 10053)
 unitTest(
-  { perms: { net: true } },
+  { perms: { net: true }, ignore: Deno.build.os == "windows" },
   async function fetchNullBodyStatus(): Promise<void> {
     const nullBodyStatus = [101, 204, 205, 304];
 
@@ -1005,24 +1025,6 @@ unitTest(function fetchResponseEmptyConstructor(): void {
 });
 
 unitTest(
-  { perms: { net: true, read: true } },
-  async function fetchCustomHttpClientFileCertificateSuccess(): Promise<
-    void
-  > {
-    const client = Deno.createHttpClient(
-      { caFile: "./cli/tests/tls/RootCA.crt" },
-    );
-    const response = await fetch(
-      "https://localhost:5545/cli/tests/fixture.json",
-      { client },
-    );
-    const json = await response.json();
-    assertEquals(json.name, "deno");
-    client.close();
-  },
-);
-
-unitTest(
   { perms: { net: true } },
   async function fetchCustomHttpClientParamCertificateSuccess(): Promise<
     void
@@ -1070,9 +1072,13 @@ unitTest(
     const buf = bufferServer(addr);
     const stream = new TransformStream();
     const writer = stream.writable.getWriter();
-    await writer.write(new TextEncoder().encode("hello "));
-    await writer.write(new TextEncoder().encode("world"));
-    await writer.close();
+    // transformer writes don't resolve until they are read, so awaiting these
+    // will cause the transformer to hang, as the suspend the transformer, it
+    // is also illogical to await for the reads, as that is the whole point of
+    // streams is to have a "queue" which gets drained...
+    writer.write(new TextEncoder().encode("hello "));
+    writer.write(new TextEncoder().encode("world"));
+    writer.close();
     const response = await fetch(`http://${addr}/blah`, {
       method: "POST",
       headers: [
@@ -1094,8 +1100,12 @@ unitTest(
       `user-agent: Deno/${Deno.version.deno}\r\n`,
       "accept-encoding: gzip, br\r\n",
       `host: ${addr}\r\n`,
-      `content-length: 11\r\n\r\n`,
-      "hello world",
+      `transfer-encoding: chunked\r\n\r\n`,
+      "6\r\n",
+      "hello \r\n",
+      "5\r\n",
+      "world\r\n",
+      "0\r\n\r\n",
     ].join("");
     assertEquals(actual, expected);
   },
