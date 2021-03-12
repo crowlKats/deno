@@ -275,7 +275,10 @@ lazy_static! {
 /// Main entry point for parsing deno's command line flags.
 pub fn flags_from_vec(args: Vec<String>) -> clap::Result<Flags> {
   let app: Opt = Opt::try_parse_from(args).map_err(|e| {
-    clap::Error::with_description(e.to_string().trim_start_matches("error: ").to_string(), e.kind)
+    clap::Error::with_description(
+      e.to_string().trim_start_matches("error: ").to_string(),
+      e.kind,
+    )
   })?;
 
   let mut flags = Flags::default();
@@ -338,7 +341,10 @@ pub fn flags_from_vec(args: Vec<String>) -> clap::Result<Flags> {
             ca_file: CAFileArg { cert: None },
           },
         },
-        inspect: InspectArgs { inspect: None, inspect_brk: None }
+        inspect: InspectArgs {
+          inspect: None,
+          inspect_brk: None,
+        },
       },
     );
   }
@@ -487,7 +493,6 @@ struct CompileSubcommand {
 
   #[clap(flatten)]
   permissions: PermissionArgs,
-
 }
 
 #[derive(Clap, Clone, Debug)]
@@ -512,7 +517,6 @@ struct CompletionsSubcommand {
   #[clap(arg_enum)]
   shell: Shell,
 }
-
 
 /// Print coverage reports from coverage profiles.
 ///
@@ -543,11 +547,21 @@ struct CoverageSubcommand {
   ignore: Vec<PathBuf>,
 
   /// Include source files in the report
-  #[clap(long, require_equals = true, value_name = "regex", default_value = r"^file:")]
+  #[clap(
+    long,
+    require_equals = true,
+    value_name = "regex",
+    default_value = r"^file:"
+  )]
   include: Vec<String>,
 
   /// Exclude source files from the report
-  #[clap(long, require_equals = true, value_name = "regex", default_value = r"test\.(js|mjs|ts|jsx|tsx)$")]
+  #[clap(
+    long,
+    require_equals = true,
+    value_name = "regex",
+    default_value = r"test\.(js|mjs|ts|jsx|tsx)$"
+  )]
   exclude: Vec<String>,
 
   /// Output coverage report in lcov format
@@ -793,13 +807,15 @@ struct InstallSubcommand {
 
 /// Start the language server
 #[derive(Clap, Clone, Debug)]
-#[clap(long_about = r#"The 'deno lsp' subcommand provides a way for code editors and IDEs to
+#[clap(
+  long_about = r#"The 'deno lsp' subcommand provides a way for code editors and IDEs to
 interact with Deno using the Language Server Protocol. Usually humans do not
 use this subcommand directly. For example, 'deno lsp' can provide IDEs with
 go-to-definition support and automatic code formatting.
 
 How to connect various editors and IDEs to 'deno lsp':
-https://deno.land/manual/getting_started/setup_your_environment#editors-and-ides"#)]
+https://deno.land/manual/getting_started/setup_your_environment#editors-and-ides"#
+)]
 struct LspSubcommand {}
 
 /// Lint source files
@@ -1182,7 +1198,6 @@ struct InspectArgs {
   /// Activate inspector on host:port and break at start of user script
   #[clap(long, value_name = "HOST:PORT", require_equals = true, validator = inspect_arg_validate)]
   inspect_brk: Option<Option<String>>,
-
 }
 
 #[derive(Clap, Clone, Debug)]
@@ -1243,6 +1258,7 @@ fn completions_parse(
   matches: CompletionsSubcommand,
   mut app: &mut clap::App,
 ) {
+  use clap_generate::generate;
   use clap_generate::generators::{Bash, Fish, PowerShell, Zsh};
 
   let mut buf: Vec<u8> = vec![];
@@ -1250,12 +1266,10 @@ fn completions_parse(
   let name = "deno";
 
   match matches.shell {
-    Shell::Bash => clap_generate::generate::<Bash, _>(&mut app, name, &mut buf),
-    Shell::Fish => clap_generate::generate::<Fish, _>(&mut app, name, &mut buf),
-    Shell::PowerShell => {
-      clap_generate::generate::<PowerShell, _>(&mut app, name, &mut buf)
-    }
-    Shell::Zsh => clap_generate::generate::<Zsh, _>(&mut app, name, &mut buf),
+    Shell::Bash => generate::<Bash, _>(&mut app, name, &mut buf),
+    Shell::Fish => generate::<Fish, _>(&mut app, name, &mut buf),
+    Shell::PowerShell => generate::<PowerShell, _>(&mut app, name, &mut buf),
+    Shell::Zsh => generate::<Zsh, _>(&mut app, name, &mut buf),
   }
 
   flags.subcommand = DenoSubcommand::Completions {
