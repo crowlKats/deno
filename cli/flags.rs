@@ -274,10 +274,9 @@ lazy_static! {
 
 /// Main entry point for parsing deno's command line flags.
 pub fn flags_from_vec(args: Vec<String>) -> clap::Result<Flags> {
-  let app: Opt = Opt::try_parse_from(args)/*.map_err(|e| clap::Error {
-    message: e.message.trim_start_matches("error: ").to_string(),
-    ..e
-  })*/?;
+  let app: Opt = Opt::try_parse_from(args).map_err(|e| {
+    clap::Error::with_description(e.to_string().trim_start_matches("error: ").to_string(), e.kind)
+  })?;
 
   let mut flags = Flags::default();
 
