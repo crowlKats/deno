@@ -1,5 +1,6 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
+use deno_core::proc_macros::deno_op;
 use deno_core::error::generic_error;
 use deno_core::error::type_error;
 use deno_core::error::uri_error;
@@ -11,6 +12,7 @@ use deno_core::url::form_urlencoded;
 use deno_core::url::quirks;
 use deno_core::url::Url;
 use deno_core::JsRuntime;
+use deno_core::OpState;
 use deno_core::ZeroCopyBuf;
 use serde::Deserialize;
 use serde::Serialize;
@@ -19,11 +21,8 @@ use std::path::PathBuf;
 
 /// Parse `UrlParseArgs::href` with an optional `UrlParseArgs::base_href`, or an
 /// optional part to "set" after parsing. Return `UrlParts`.
-pub fn op_url_parse(
-  _state: &mut deno_core::OpState,
-  args: Value,
-  _zero_copy: &mut [ZeroCopyBuf],
-) -> Result<Value, AnyError> {
+#[deno_op]
+pub fn op_url_parse(args: Value) -> Result<Value, AnyError> {
   #[derive(Deserialize)]
   #[serde(rename_all = "camelCase")]
   struct UrlParseArgs {
@@ -118,11 +117,8 @@ pub fn op_url_parse(
   }))
 }
 
-pub fn op_url_parse_search_params(
-  _state: &mut deno_core::OpState,
-  args: Value,
-  _zero_copy: &mut [ZeroCopyBuf],
-) -> Result<Value, AnyError> {
+#[deno_op]
+pub fn op_url_parse_search_params(args: Value) -> Result<Value, AnyError> {
   let search: String = serde_json::from_value(args)?;
   let search_params: Vec<_> = form_urlencoded::parse(search.as_bytes())
     .into_iter()
@@ -130,11 +126,8 @@ pub fn op_url_parse_search_params(
   Ok(json!(search_params))
 }
 
-pub fn op_url_stringify_search_params(
-  _state: &mut deno_core::OpState,
-  args: Value,
-  _zero_copy: &mut [ZeroCopyBuf],
-) -> Result<Value, AnyError> {
+#[deno_op]
+pub fn op_url_stringify_search_params(args: Value) -> Result<Value, AnyError> {
   let search_params: Vec<(String, String)> = serde_json::from_value(args)?;
   let search = form_urlencoded::Serializer::new(String::new())
     .extend_pairs(search_params)

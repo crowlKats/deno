@@ -14,6 +14,7 @@ members = [
   "op_crates/webgpu",
   "op_crates/webidl",
   "op_crates/websocket",
+  "proc_macros",
 ]
 exclude = [
   "std/hash/_wasm"

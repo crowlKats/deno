@@ -22,6 +22,7 @@ mod shared_queue;
 mod zero_copy_buf;
 
 // Re-exports
+pub use deno_proc_macros as proc_macros;
 pub use futures;
 pub use rusty_v8 as v8;
 pub use serde;

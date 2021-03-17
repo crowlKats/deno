@@ -2,6 +2,7 @@
 
 #![deny(warnings)]
 
+use deno_core::proc_macros::deno_op;
 use deno_core::error::bad_resource_id;
 use deno_core::error::generic_error;
 use deno_core::error::type_error;
@@ -103,10 +104,11 @@ pub fn get_declaration() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib.deno_fetch.d.ts")
 }
 
+#[deno_op]
 pub fn op_fetch<FP>(
   state: &mut OpState,
   args: Value,
-  data: &mut [ZeroCopyBuf],
+  zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<Value, AnyError>
 where
   FP: FetchPermissions + 'static,
@@ -160,7 +162,7 @@ where
   let mut request = client.request(method, url);
 
   let maybe_request_body_rid = if args.has_body {
-    match data.len() {
+    match zero_copy.len() {
       0 => {
         // If no body is passed, we return a writer for streaming the body.
         let (tx, rx) = mpsc::channel::<std::io::Result<Vec<u8>>>(1);
@@ -176,7 +178,7 @@ where
       }
       1 => {
         // If a body is passed, we use it, and don't return a body for streaming.
-        request = request.body(Vec::from(&*data[0]));
+        request = request.body(Vec::from(&*zero_copy[0]));
         None
       }
       _ => panic!("Invalid number of arguments"),
@@ -203,10 +205,10 @@ where
   }))
 }
 
+#[deno_op]
 pub async fn op_fetch_send(
   state: Rc<RefCell<OpState>>,
   args: Value,
-  _data: BufVec,
 ) -> Result<Value, AnyError> {
   #[derive(Deserialize)]
   #[serde(rename_all = "camelCase")]
@@ -273,10 +275,11 @@ pub async fn op_fetch_send(
   }))
 }
 
+#[deno_op]
 pub async fn op_fetch_request_write(
   state: Rc<RefCell<OpState>>,
   args: Value,
-  data: BufVec,
+  bufs: BufVec,
 ) -> Result<Value, AnyError> {
   #[derive(Deserialize)]
   #[serde(rename_all = "camelCase")]
@@ -287,8 +290,8 @@ pub async fn op_fetch_request_write(
   let args: Args = serde_json::from_value(args)?;
   let rid = args.rid;
 
-  let buf = match data.len() {
-    1 => Vec::from(&*data[0]),
+  let buf = match bufs.len() {
+    1 => Vec::from(&*bufs[0]),
     _ => panic!("Invalid number of arguments"),
   };
 
@@ -304,10 +307,11 @@ pub async fn op_fetch_request_write(
   Ok(json!({}))
 }
 
+#[deno_op]
 pub async fn op_fetch_response_read(
   state: Rc<RefCell<OpState>>,
   args: Value,
-  data: BufVec,
+  bufs: BufVec,
 ) -> Result<Value, AnyError> {
   #[derive(Deserialize)]
   #[serde(rename_all = "camelCase")]
@@ -318,7 +322,7 @@ pub async fn op_fetch_response_read(
   let args: Args = serde_json::from_value(args)?;
   let rid = args.rid;
 
-  if data.len() != 1 {
+  if bufs.len() != 1 {
     panic!("Invalid number of arguments");
   }
 
@@ -329,7 +333,7 @@ pub async fn op_fetch_response_read(
     .ok_or_else(bad_resource_id)?;
   let mut reader = RcRef::map(&resource, |r| &r.reader).borrow_mut().await;
   let cancel = RcRef::map(resource, |r| &r.cancel);
-  let mut buf = data[0].clone();
+  let mut buf = bufs[0].clone();
   let read = reader.read(&mut buf).try_or_cancel(cancel).await?;
   Ok(json!({ "read": read }))
 }
@@ -385,11 +389,8 @@ impl HttpClientResource {
   }
 }
 
-pub fn op_create_http_client<FP>(
-  state: &mut OpState,
-  args: Value,
-  _zero_copy: &mut [ZeroCopyBuf],
-) -> Result<Value, AnyError>
+#[deno_op]
+pub fn op_create_http_client<FP>(state: &mut OpState, args: Value) -> Result<Value, AnyError>
 where
   FP: FetchPermissions + 'static,
 {
