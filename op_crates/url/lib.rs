@@ -1,11 +1,10 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
-use deno_core::proc_macros::deno_op;
 use deno_core::error::generic_error;
 use deno_core::error::type_error;
 use deno_core::error::uri_error;
 use deno_core::error::AnyError;
-use deno_core::serde_json;
+use deno_core::proc_macros::deno_op;
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
 use deno_core::url::form_urlencoded;
@@ -22,55 +21,50 @@ use std::path::PathBuf;
 /// Parse `UrlParseArgs::href` with an optional `UrlParseArgs::base_href`, or an
 /// optional part to "set" after parsing. Return `UrlParts`.
 #[deno_op]
-pub fn op_url_parse(args: Value) -> Result<Value, AnyError> {
-  #[derive(Deserialize)]
-  #[serde(rename_all = "camelCase")]
-  struct UrlParseArgs {
-    href: String,
-    base_href: Option<String>,
-    // If one of the following are present, this is a setter call. Apply the
-    // proper `Url::set_*()` method after (re)parsing `href`.
-    set_hash: Option<String>,
-    set_host: Option<String>,
-    set_hostname: Option<String>,
-    set_password: Option<String>,
-    set_pathname: Option<String>,
-    set_port: Option<String>,
-    set_protocol: Option<String>,
-    set_search: Option<String>,
-    set_username: Option<String>,
-  }
-  let args: UrlParseArgs = serde_json::from_value(args)?;
-  let base_url = args
-    .base_href
+pub fn op_url_parse(
+  href: String,
+  base_href: Option<String>,
+  // If one of the following are present, this is a setter call. Apply the
+  // proper `Url::set_*()` method after (re)parsing `href`.
+  set_hash: Option<String>,
+  set_host: Option<String>,
+  set_hostname: Option<String>,
+  set_password: Option<String>,
+  set_pathname: Option<String>,
+  set_port: Option<String>,
+  set_protocol: Option<String>,
+  set_search: Option<String>,
+  set_username: Option<String>,
+) -> Result<Value, AnyError> {
+  let base_url = base_href
     .as_ref()
     .map(|b| Url::parse(b).map_err(|_| type_error("Invalid base URL")))
     .transpose()?;
   let mut url = Url::options()
     .base_url(base_url.as_ref())
-    .parse(&args.href)
+    .parse(&href)
     .map_err(|_| type_error("Invalid URL"))?;
 
-  if let Some(hash) = args.set_hash.as_ref() {
+  if let Some(hash) = set_hash.as_ref() {
     quirks::set_hash(&mut url, hash);
-  } else if let Some(host) = args.set_host.as_ref() {
+  } else if let Some(host) = set_host.as_ref() {
     quirks::set_host(&mut url, host).map_err(|_| uri_error("Invalid host"))?;
-  } else if let Some(hostname) = args.set_hostname.as_ref() {
+  } else if let Some(hostname) = set_hostname.as_ref() {
     quirks::set_hostname(&mut url, hostname)
       .map_err(|_| uri_error("Invalid hostname"))?;
-  } else if let Some(password) = args.set_password.as_ref() {
+  } else if let Some(password) = set_password.as_ref() {
     quirks::set_password(&mut url, password)
       .map_err(|_| uri_error("Invalid password"))?;
-  } else if let Some(pathname) = args.set_pathname.as_ref() {
+  } else if let Some(pathname) = set_pathname.as_ref() {
     quirks::set_pathname(&mut url, pathname);
-  } else if let Some(port) = args.set_port.as_ref() {
+  } else if let Some(port) = set_port.as_ref() {
     quirks::set_port(&mut url, port).map_err(|_| uri_error("Invalid port"))?;
-  } else if let Some(protocol) = args.set_protocol.as_ref() {
+  } else if let Some(protocol) = set_protocol.as_ref() {
     quirks::set_protocol(&mut url, protocol)
       .map_err(|_| uri_error("Invalid protocol"))?;
-  } else if let Some(search) = args.set_search.as_ref() {
+  } else if let Some(search) = set_search.as_ref() {
     quirks::set_search(&mut url, search);
-  } else if let Some(username) = args.set_username.as_ref() {
+  } else if let Some(username) = set_username.as_ref() {
     quirks::set_username(&mut url, username)
       .map_err(|_| uri_error("Invalid username"))?;
   }
@@ -95,9 +89,8 @@ pub fn op_url_parse(args: Value) -> Result<Value, AnyError> {
     generic_error(format!(
       "Internal error while parsing \"{}\"{}, \
        see https://github.com/servo/rust-url/issues/670",
-      args.href,
-      args
-        .base_href
+      href,
+      base_href
         .map(|b| format!(" against \"{}\"", b))
         .unwrap_or_default()
     ))
@@ -118,19 +111,19 @@ pub fn op_url_parse(args: Value) -> Result<Value, AnyError> {
 }
 
 #[deno_op]
-pub fn op_url_parse_search_params(args: Value) -> Result<Value, AnyError> {
-  let search: String = serde_json::from_value(args)?;
-  let search_params: Vec<_> = form_urlencoded::parse(search.as_bytes())
+pub fn op_url_parse_search_params(args: String) -> Result<Value, AnyError> {
+  let search_params: Vec<_> = form_urlencoded::parse(args.as_bytes())
     .into_iter()
     .collect();
   Ok(json!(search_params))
 }
 
 #[deno_op]
-pub fn op_url_stringify_search_params(args: Value) -> Result<Value, AnyError> {
-  let search_params: Vec<(String, String)> = serde_json::from_value(args)?;
+pub fn op_url_stringify_search_params(
+  args: Vec<(String, String)>,
+) -> Result<Value, AnyError> {
   let search = form_urlencoded::Serializer::new(String::new())
-    .extend_pairs(search_params)
+    .extend_pairs(args)
     .finish();
   Ok(json!(search))
 }

@@ -15,9 +15,9 @@ pub fn deno_op(_: TokenStream, item: TokenStream) -> TokenStream {
     let name = format!("{}_args", ident.to_string())
       .split('_')
       .map(|s| {
-        if s.len() > 0 {
+        if !s.is_empty() {
           let mut chars: Vec<char> = s.chars().collect();
-          chars[0] = chars[0].to_uppercase().nth(0).unwrap();
+          chars[0] = chars[0].to_uppercase().next().unwrap();
           chars.into_iter().collect::<String>()
         } else {
           String::new()
@@ -44,7 +44,7 @@ pub fn deno_op(_: TokenStream, item: TokenStream) -> TokenStream {
               op_state = Some(arg.clone());
             } else if iter.peek().is_none()
               && ((!is_async && name.as_str() == "zero_copy")
-              || (is_async && name.as_str() == "bufs"))
+                || (is_async && name.as_str() == "bufs"))
             {
               zero_copy = Some(arg.clone());
             } else {
@@ -95,6 +95,8 @@ pub fn deno_op(_: TokenStream, item: TokenStream) -> TokenStream {
     func.sig.inputs.push_value(arg);
 
     arg_struct = Some(quote! {
+      #[derive(Deserialize)]
+      #[serde(rename_all = "camelCase")]
       pub struct #struct_name {
         #(#args),*
       }

@@ -2,8 +2,8 @@
 
 #![deny(warnings)]
 
-use deno_core::proc_macros::deno_op;
 use deno_core::error::AnyError;
+use deno_core::proc_macros::deno_op;
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
 use deno_core::JsRuntime;
@@ -28,7 +28,10 @@ pub fn init(isolate: &mut JsRuntime) {
 }
 
 #[deno_op]
-pub fn op_crypto_get_random_values(state: &mut OpState, zero_copy: &mut [ZeroCopyBuf]) -> Result<Value, AnyError> {
+pub fn op_crypto_get_random_values(
+  state: &mut OpState,
+  zero_copy: &mut [ZeroCopyBuf],
+) -> Result<Value, AnyError> {
   assert_eq!(zero_copy.len(), 1);
   let maybe_seeded_rng = state.try_borrow_mut::<StdRng>();
   if let Some(seeded_rng) = maybe_seeded_rng {

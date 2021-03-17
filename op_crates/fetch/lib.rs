@@ -2,7 +2,6 @@
 
 #![deny(warnings)]
 
-use deno_core::proc_macros::deno_op;
 use deno_core::error::bad_resource_id;
 use deno_core::error::generic_error;
 use deno_core::error::type_error;
@@ -10,7 +9,7 @@ use deno_core::error::AnyError;
 use deno_core::futures::Future;
 use deno_core::futures::Stream;
 use deno_core::futures::StreamExt;
-use deno_core::serde_json;
+use deno_core::proc_macros::deno_op;
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
 use deno_core::url::Url;
@@ -107,26 +106,18 @@ pub fn get_declaration() -> PathBuf {
 #[deno_op]
 pub fn op_fetch<FP>(
   state: &mut OpState,
-  args: Value,
+  method: Option<String>,
+  url: String,
+  base_url: Option<String>,
+  headers: Vec<(String, String)>,
+  client_rid: Option<u32>,
+  has_body: bool,
   zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<Value, AnyError>
 where
   FP: FetchPermissions + 'static,
 {
-  #[derive(Deserialize)]
-  #[serde(rename_all = "camelCase")]
-  struct FetchArgs {
-    method: Option<String>,
-    url: String,
-    base_url: Option<String>,
-    headers: Vec<(String, String)>,
-    client_rid: Option<u32>,
-    has_body: bool,
-  }
-
-  let args: FetchArgs = serde_json::from_value(args)?;
-
-  let client = if let Some(rid) = args.client_rid {
+  let client = if let Some(rid) = client_rid {
     let r = state
       .resource_table
       .get::<HttpClientResource>(rid)
@@ -137,18 +128,16 @@ where
     client.clone()
   };
 
-  let method = match args.method {
+  let method = match method {
     Some(method_str) => Method::from_bytes(method_str.as_bytes())?,
     None => Method::GET,
   };
 
-  let base_url = match args.base_url {
+  let base_url = match base_url {
     Some(base_url) => Some(Url::parse(&base_url)?),
     _ => None,
   };
-  let url = Url::options()
-    .base_url(base_url.as_ref())
-    .parse(&args.url)?;
+  let url = Url::options().base_url(base_url.as_ref()).parse(&url)?;
 
   // Check scheme before asking for net permission
   let scheme = url.scheme();
@@ -161,7 +150,7 @@ where
 
   let mut request = client.request(method, url);
 
-  let maybe_request_body_rid = if args.has_body {
+  let maybe_request_body_rid = if has_body {
     match zero_copy.len() {
       0 => {
         // If no body is passed, we return a writer for streaming the body.
@@ -187,7 +176,7 @@ where
     None
   };
 
-  for (key, value) in args.headers {
+  for (key, value) in headers {
     let name = HeaderName::from_bytes(key.as_bytes()).unwrap();
     let v = HeaderValue::from_str(&value).unwrap();
     request = request.header(name, v);
@@ -205,19 +194,17 @@ where
   }))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Args {
+  rid: u32,
+}
+
 #[deno_op]
 pub async fn op_fetch_send(
   state: Rc<RefCell<OpState>>,
-  args: Value,
+  args: Args,
 ) -> Result<Value, AnyError> {
-  #[derive(Deserialize)]
-  #[serde(rename_all = "camelCase")]
-  struct Args {
-    rid: u32,
-  }
-
-  let args: Args = serde_json::from_value(args)?;
-
   let request = state
     .borrow_mut()
     .resource_table
@@ -278,16 +265,9 @@ pub async fn op_fetch_send(
 #[deno_op]
 pub async fn op_fetch_request_write(
   state: Rc<RefCell<OpState>>,
-  args: Value,
+  args: Args,
   bufs: BufVec,
 ) -> Result<Value, AnyError> {
-  #[derive(Deserialize)]
-  #[serde(rename_all = "camelCase")]
-  struct Args {
-    rid: u32,
-  }
-
-  let args: Args = serde_json::from_value(args)?;
   let rid = args.rid;
 
   let buf = match bufs.len() {
@@ -310,16 +290,9 @@ pub async fn op_fetch_request_write(
 #[deno_op]
 pub async fn op_fetch_response_read(
   state: Rc<RefCell<OpState>>,
-  args: Value,
+  args: Args,
   bufs: BufVec,
 ) -> Result<Value, AnyError> {
-  #[derive(Deserialize)]
-  #[serde(rename_all = "camelCase")]
-  struct Args {
-    rid: u32,
-  }
-
-  let args: Args = serde_json::from_value(args)?;
   let rid = args.rid;
 
   if bufs.len() != 1 {
@@ -390,28 +363,21 @@ impl HttpClientResource {
 }
 
 #[deno_op]
-pub fn op_create_http_client<FP>(state: &mut OpState, args: Value) -> Result<Value, AnyError>
+pub fn op_create_http_client<FP>(
+  state: &mut OpState,
+  ca_file: Option<String>,
+  ca_data: Option<String>,
+) -> Result<Value, AnyError>
 where
   FP: FetchPermissions + 'static,
 {
-  #[derive(Deserialize, Default, Debug)]
-  #[serde(rename_all = "camelCase")]
-  #[serde(default)]
-  struct CreateHttpClientOptions {
-    ca_file: Option<String>,
-    ca_data: Option<String>,
-  }
-
-  let args: CreateHttpClientOptions = serde_json::from_value(args)?;
-
-  if let Some(ca_file) = args.ca_file.clone() {
+  if let Some(ca_file) = ca_file.clone() {
     let permissions = state.borrow::<FP>();
     permissions.check_read(&PathBuf::from(ca_file))?;
   }
 
   let client =
-    create_http_client(args.ca_file.as_deref(), args.ca_data.as_deref())
-      .unwrap();
+    create_http_client(ca_file.as_deref(), ca_data.as_deref()).unwrap();
 
   let rid = state.resource_table.add(HttpClientResource::new(client));
   Ok(json!(rid))
