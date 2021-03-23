@@ -16,17 +16,104 @@
     return promise;
   }
 
+  webidl.converters.SerialPortFilter = webidl.createDictionaryConverter(
+    "SerialPortFilter",
+    [
+      { key: "usbVendorId", converter: webidl.converters["unsigned short"] },
+      { key: "usbProductId", converter: webidl.converters["unsigned short"] },
+    ],
+  );
+
+  webidl.converters.SerialPortRequestOptions = webidl.createDictionaryConverter(
+    "SerialPortRequestOptions",
+    [
+      {
+        key: "filters",
+        converter: webidl.createSequenceConverter(
+          webidl.converters.SerialPortFilter,
+        ),
+      },
+    ],
+  );
+
+  webidl.converters.ParityType = webidl.createEnumConverter("ParityType", [
+    "none",
+    "even",
+    "odd",
+  ]);
+
+  webidl.converters.ParityType = webidl.createEnumConverter("ParityType", [
+    "none",
+    "hardware",
+  ]);
+
+  webidl.converters.SerialOptions = webidl.createDictionaryConverter(
+    "SerialOptions",
+    [
+      {
+        key: "baudRate",
+        converter: webidl.converters["unsigned long"],
+        required: true,
+        enforceRange: true,
+      },
+      {
+        key: "dataBits",
+        converter: webidl.converters.octet,
+        enforceRange: true,
+      },
+      {
+        key: "stopBits",
+        converter: webidl.converters.octet,
+        enforceRange: true,
+      },
+      {
+        key: "parity",
+        converter: webidl.converters.ParityType,
+        defaultValue: "none",
+      },
+      {
+        key: "bufferSize",
+        converter: webidl.converters["unsigned long"],
+        enforceRange: true,
+      },
+      {
+        key: "flowControl",
+        converter: webidl.converters.FlowControlType,
+        defaultValue: "none",
+      },
+    ],
+  );
+
+  webidl.converters.SerialOutputSignals = webidl.createDictionaryConverter(
+    "SerialOutputSignals",
+    [
+      { key: "dataTerminalReady", converter: webidl.converters.boolean },
+      { key: "requestToSend", converter: webidl.converters.boolean },
+      { key: "break", converter: webidl.converters.boolean },
+    ],
+  );
+
   const availablePorts = [];
 
   class WindowSerial extends EventTarget {
-    async getPorts() {
-      // TODO check perms
+    constructor() {
+      super();
 
+      webidl.illegalConstructor();
+    }
+
+    async getPorts() {
       return availablePorts;
     }
 
-    async requestPort(options) {
+    async requestPort(options = {}) {
+      options = webidl.converters.SerialPortFilter(options, {
+        prefix: "Failed to execute 'requestPort' on 'Serial'",
+        context: "Argument 1",
+      });
+
       // TODO check perms
+      // TODO Transient activation
 
       if (options.filters) {
         for (const filter of options.filters) {
@@ -38,13 +125,20 @@
 
       const device = undefined; // TODO pick port
 
-      const port = new SerialPort(device);
+      const port = webidl.createBranded(SerialPort);
+      port[_device] = device;
       availablePorts.push(port);
       return port;
     }
   }
 
   class WorkerSerial extends EventTarget {
+    constructor() {
+      super();
+
+      webidl.illegalConstructor();
+    }
+
     async getPorts() {
       // TODO check perms
 
@@ -52,6 +146,7 @@
     }
   }
 
+  const _device = Symbol("[[device]]");
   const _state = Symbol("[[state]]");
   const _bufferSize = Symbol("[[bufferSize]]");
   const _readable = Symbol("[[readable]]");
@@ -60,10 +155,9 @@
   const _writeFatal = Symbol("[[writeFatal]]");
   const _pendingClosePromise = Symbol("[[pendingClosePromise]]");
 
-
   class SerialPort extends EventTarget {
     #rid;
-    #device;
+    [_device];
     [_state] = "closed";
     [_bufferSize];
     [_readable] = null;
@@ -146,15 +240,25 @@
       return this[_writable];
     }
 
-    constructor(device) {
+    constructor() {
       super();
 
-      this.#device = device;
+      webidl.illegalConstructor();
     }
 
-    getInfo() {}
+    getInfo() {
+      throw new Error("Not yet implemented");
+    }
 
     async open(options) {
+      const prefix = "Failed to execute 'open' on 'SerialPort'";
+      webidl.requiredArguments(arguments.length, 1, { prefix });
+
+      options = webidl.converters.SerialOptions(options, {
+        prefix,
+        context: "Argument 1",
+      });
+
       if (this[_state] !== "closed") {
         throw new DOMException("", "InvalidStateError");
       }
@@ -162,14 +266,19 @@
       this[_bufferSize] = options.bufferSize ?? 255;
       this[_state] = "opening";
       this.#rid = core.jsonOpSync("op_webserial_open", {
-        device: this.#device,
+        device: this[_device],
         ...options,
       });
 
       this[_state] = "opened";
     }
 
-    async setSignals(signals) {
+    async setSignals(signals = {}) {
+      signals = webidl.converters.SerialOutputSignals(signals, {
+        prefix: "Failed to execute 'setSignals' on 'SerialPort'",
+        context: "Argument 1",
+      });
+
       if (this[_state] !== "opened") {
         throw new DOMException("", "InvalidStateError");
       }
@@ -191,14 +300,14 @@
     async close() {
       let cancelPromise;
       if (this[_readable] === null) {
-        cancelPromise = new Promise(res => res());
+        cancelPromise = new Promise((res) => res());
       } else {
         cancelPromise = this[_readable].cancel();
       }
 
       let abortPromise;
       if (this[_writable] === null) {
-        abortPromise = new Promise(res => res());
+        abortPromise = new Promise((res) => res());
       } else {
         abortPromise = this[_writable].abort();
       }
@@ -208,7 +317,11 @@
         this[_pendingClosePromise].resolve();
       }
 
-      const combinedPromise = Promise.all([cancelPromise, abortPromise, this[_pendingClosePromise]]);
+      const combinedPromise = Promise.all([
+        cancelPromise,
+        abortPromise,
+        this[_pendingClosePromise],
+      ]);
 
       this[_state] = "closing";
 
@@ -227,7 +340,10 @@
   }
 
   window.__bootstrap.webSerial = {
-    windowSerial: new WindowSerial(),
-    workerSerial: new WorkerSerial(),
+    windowSerial: webidl.createBranded(WindowSerial),
+    workerSerial: webidl.createBranded(WorkerSerial),
+    WindowSerial,
+    WorkerSerial,
+    SerialPort,
   };
 })(this);

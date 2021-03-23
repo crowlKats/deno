@@ -346,6 +346,7 @@ delete Object.prototype.__proto__;
     GPUQuerySet: util.nonEnumerable(webgpu.GPUQuerySet),
     GPUOutOfMemoryError: util.nonEnumerable(webgpu.GPUOutOfMemoryError),
     GPUValidationError: util.nonEnumerable(webgpu.GPUValidationError),
+    SerialPort: util.nonEnumerable(webSerial.SerialPort),
   };
 
   // The console seems to be the only one that should be writable and non-enumerable
@@ -374,6 +375,7 @@ delete Object.prototype.__proto__;
     alert: util.writable(prompt.alert),
     confirm: util.writable(prompt.confirm),
     prompt: util.writable(prompt.prompt),
+    Serial: util.nonEnumerable(webSerial.WindowSerial),
   };
 
   const workerRuntimeGlobalProperties = {
@@ -395,6 +397,7 @@ delete Object.prototype.__proto__;
     close: util.nonEnumerable(workerClose),
     postMessage: util.writable(postMessage),
     workerMessageRecvCallback: util.nonEnumerable(workerMessageRecvCallback),
+    Serial: util.nonEnumerable(webSerial.WorkerSerial),
   };
 
   let hasBootstrapped = false;
