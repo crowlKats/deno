@@ -1,7 +1,8 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
-use super::io::StreamResource;
 use super::io::TcpStreamResource;
+use super::io::TlsClientStreamResource;
+use super::io::TlsServerStreamResource;
 use crate::permissions::Permissions;
 use crate::resolve_addr::resolve_addr;
 use crate::resolve_addr::resolve_addr_sync;
@@ -10,7 +11,6 @@ use deno_core::error::bad_resource_id;
 use deno_core::error::custom_error;
 use deno_core::error::generic_error;
 use deno_core::error::AnyError;
-use deno_core::serde_json;
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
 use deno_core::AsyncRefCell;
@@ -20,6 +20,7 @@ use deno_core::CancelTryFuture;
 use deno_core::OpState;
 use deno_core::RcRef;
 use deno_core::Resource;
+use deno_core::ResourceId;
 use deno_core::ZeroCopyBuf;
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -78,7 +79,7 @@ pub fn init(rt: &mut deno_core::JsRuntime) {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ConnectTLSArgs {
+pub struct ConnectTLSArgs {
   transport: String,
   hostname: String,
   port: u16,
@@ -88,31 +89,29 @@ struct ConnectTLSArgs {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StartTLSArgs {
-  rid: u32,
+  rid: ResourceId,
   cert_file: Option<String>,
   hostname: String,
 }
 
 async fn op_start_tls(
   state: Rc<RefCell<OpState>>,
-  args: Value,
+  args: StartTLSArgs,
   _zero_copy: BufVec,
 ) -> Result<Value, AnyError> {
-  let args: StartTLSArgs = serde_json::from_value(args)?;
-  let rid = args.rid as u32;
-  let cert_file = args.cert_file.clone();
+  let rid = args.rid;
 
-  let mut domain = args.hostname;
+  let mut domain = args.hostname.as_str();
   if domain.is_empty() {
-    domain.push_str("localhost");
+    domain = "localhost";
   }
   {
     super::check_unstable2(&state, "Deno.startTls");
     let s = state.borrow();
     let permissions = s.borrow::<Permissions>();
-    permissions.check_net(&(&domain, Some(0)))?;
-    if let Some(path) = cert_file.clone() {
-      permissions.check_read(Path::new(&path))?;
+    permissions.net.check(&(&domain, Some(0)))?;
+    if let Some(path) = &args.cert_file {
+      permissions.read.check(Path::new(&path))?;
     }
   }
 
@@ -133,22 +132,22 @@ async fn op_start_tls(
   config
     .root_store
     .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
-  if let Some(path) = cert_file {
+  if let Some(path) = args.cert_file {
     let key_file = File::open(path)?;
     let reader = &mut BufReader::new(key_file);
     config.root_store.add_pem_file(reader).unwrap();
   }
 
   let tls_connector = TlsConnector::from(Arc::new(config));
-  let dnsname =
-    DNSNameRef::try_from_ascii_str(&domain).expect("Invalid DNS lookup");
+  let dnsname = DNSNameRef::try_from_ascii_str(&domain)
+    .map_err(|_| generic_error("Invalid DNS lookup"))?;
   let tls_stream = tls_connector.connect(dnsname, tcp_stream).await?;
 
   let rid = {
     let mut state_ = state.borrow_mut();
     state_
       .resource_table
-      .add(StreamResource::client_tls_stream(tls_stream))
+      .add(TlsClientStreamResource::from(tls_stream))
   };
   Ok(json!({
       "rid": rid,
@@ -167,22 +166,20 @@ async fn op_start_tls(
 
 async fn op_connect_tls(
   state: Rc<RefCell<OpState>>,
-  args: Value,
+  args: ConnectTLSArgs,
   _zero_copy: BufVec,
 ) -> Result<Value, AnyError> {
-  let args: ConnectTLSArgs = serde_json::from_value(args)?;
-  let cert_file = args.cert_file.clone();
   {
     let s = state.borrow();
     let permissions = s.borrow::<Permissions>();
-    permissions.check_net(&(&args.hostname, Some(args.port)))?;
-    if let Some(path) = cert_file.clone() {
-      permissions.check_read(Path::new(&path))?;
+    permissions.net.check(&(&args.hostname, Some(args.port)))?;
+    if let Some(path) = &args.cert_file {
+      permissions.read.check(Path::new(&path))?;
     }
   }
-  let mut domain = args.hostname.clone();
+  let mut domain = args.hostname.as_str();
   if domain.is_empty() {
-    domain.push_str("localhost");
+    domain = "localhost";
   }
 
   let addr = resolve_addr(&args.hostname, args.port)
@@ -197,20 +194,20 @@ async fn op_connect_tls(
   config
     .root_store
     .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
-  if let Some(path) = cert_file {
+  if let Some(path) = args.cert_file {
     let key_file = File::open(path)?;
     let reader = &mut BufReader::new(key_file);
     config.root_store.add_pem_file(reader).unwrap();
   }
   let tls_connector = TlsConnector::from(Arc::new(config));
-  let dnsname =
-    DNSNameRef::try_from_ascii_str(&domain).expect("Invalid DNS lookup");
+  let dnsname = DNSNameRef::try_from_ascii_str(&domain)
+    .map_err(|_| generic_error("Invalid DNS lookup"))?;
   let tls_stream = tls_connector.connect(dnsname, tcp_stream).await?;
   let rid = {
     let mut state_ = state.borrow_mut();
     state_
       .resource_table
-      .add(StreamResource::client_tls_stream(tls_stream))
+      .add(TlsClientStreamResource::from(tls_stream))
   };
   Ok(json!({
       "rid": rid,
@@ -299,7 +296,7 @@ impl Resource for TlsListenerResource {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ListenTlsArgs {
+pub struct ListenTlsArgs {
   transport: String,
   hostname: String,
   port: u16,
@@ -309,19 +306,18 @@ struct ListenTlsArgs {
 
 fn op_listen_tls(
   state: &mut OpState,
-  args: Value,
+  args: ListenTlsArgs,
   _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<Value, AnyError> {
-  let args: ListenTlsArgs = serde_json::from_value(args)?;
   assert_eq!(args.transport, "tcp");
 
   let cert_file = args.cert_file;
   let key_file = args.key_file;
   {
     let permissions = state.borrow::<Permissions>();
-    permissions.check_net(&(&args.hostname, Some(args.port)))?;
-    permissions.check_read(Path::new(&cert_file))?;
-    permissions.check_read(Path::new(&key_file))?;
+    permissions.net.check(&(&args.hostname, Some(args.port)))?;
+    permissions.read.check(Path::new(&cert_file))?;
+    permissions.read.check(Path::new(&key_file))?;
   }
   let mut config = ServerConfig::new(NoClientAuth::new());
   config
@@ -354,17 +350,16 @@ fn op_listen_tls(
 }
 
 #[derive(Deserialize)]
-struct AcceptTlsArgs {
-  rid: i32,
+pub struct AcceptTlsArgs {
+  rid: ResourceId,
 }
 
 async fn op_accept_tls(
   state: Rc<RefCell<OpState>>,
-  args: Value,
+  args: AcceptTlsArgs,
   _zero_copy: BufVec,
 ) -> Result<Value, AnyError> {
-  let args: AcceptTlsArgs = serde_json::from_value(args)?;
-  let rid = args.rid as u32;
+  let rid = args.rid;
 
   let resource = state
     .borrow()
@@ -402,7 +397,7 @@ async fn op_accept_tls(
     let mut state_ = state.borrow_mut();
     state_
       .resource_table
-      .add(StreamResource::server_tls_stream(tls_stream))
+      .add(TlsServerStreamResource::from(tls_stream))
   };
 
   Ok(json!({

@@ -1,16 +1,15 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
-use super::io::std_file_resource;
-use super::io::StreamResource;
+use super::io::StdFileResource;
 use deno_core::error::bad_resource_id;
 use deno_core::error::not_supported;
 use deno_core::error::resource_unavailable;
 use deno_core::error::AnyError;
-use deno_core::serde_json;
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
 use deno_core::OpState;
 use deno_core::RcRef;
+use deno_core::ResourceId;
 use deno_core::ZeroCopyBuf;
 use serde::Deserialize;
 use serde::Serialize;
@@ -54,25 +53,24 @@ pub fn init(rt: &mut deno_core::JsRuntime) {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SetRawOptions {
+pub struct SetRawOptions {
   cbreak: bool,
 }
 
 #[derive(Deserialize)]
-struct SetRawArgs {
-  rid: u32,
+pub struct SetRawArgs {
+  rid: ResourceId,
   mode: bool,
   options: SetRawOptions,
 }
 
 fn op_set_raw(
   state: &mut OpState,
-  args: Value,
+  args: SetRawArgs,
   _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<Value, AnyError> {
   super::check_unstable(state, "Deno.setRaw");
 
-  let args: SetRawArgs = serde_json::from_value(args)?;
   let rid = args.rid;
   let is_raw = args.mode;
   let cbreak = args.options.cbreak;
@@ -90,7 +88,7 @@ fn op_set_raw(
 
     let resource = state
       .resource_table
-      .get::<StreamResource>(rid)
+      .get::<StdFileResource>(rid)
       .ok_or_else(bad_resource_id)?;
 
     if cbreak {
@@ -157,7 +155,7 @@ fn op_set_raw(
 
     let resource = state
       .resource_table
-      .get::<StreamResource>(rid)
+      .get::<StdFileResource>(rid)
       .ok_or_else(bad_resource_id)?;
 
     if resource.fs_file.is_none() {
@@ -217,19 +215,18 @@ fn op_set_raw(
 }
 
 #[derive(Deserialize)]
-struct IsattyArgs {
-  rid: u32,
+pub struct IsattyArgs {
+  rid: ResourceId,
 }
 
 fn op_isatty(
   state: &mut OpState,
-  args: Value,
+  args: IsattyArgs,
   _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<Value, AnyError> {
-  let args: IsattyArgs = serde_json::from_value(args)?;
   let rid = args.rid;
 
-  let isatty: bool = std_file_resource(state, rid as u32, move |r| match r {
+  let isatty: bool = StdFileResource::with(state, rid, move |r| match r {
     Ok(std_file) => {
       #[cfg(windows)]
       {
@@ -253,8 +250,8 @@ fn op_isatty(
 }
 
 #[derive(Deserialize)]
-struct ConsoleSizeArgs {
-  rid: u32,
+pub struct ConsoleSizeArgs {
+  rid: ResourceId,
 }
 
 #[derive(Serialize)]
@@ -265,15 +262,14 @@ struct ConsoleSize {
 
 fn op_console_size(
   state: &mut OpState,
-  args: Value,
+  args: ConsoleSizeArgs,
   _zero_copy: &mut [ZeroCopyBuf],
-) -> Result<Value, AnyError> {
+) -> Result<ConsoleSize, AnyError> {
   super::check_unstable(state, "Deno.consoleSize");
 
-  let args: ConsoleSizeArgs = serde_json::from_value(args)?;
   let rid = args.rid;
 
-  let size = std_file_resource(state, rid as u32, move |r| match r {
+  let size = StdFileResource::with(state, rid, move |r| match r {
     Ok(std_file) => {
       #[cfg(windows)]
       {
@@ -321,5 +317,5 @@ fn op_console_size(
     Err(_) => Err(bad_resource_id()),
   })?;
 
-  Ok(json!(size))
+  Ok(size)
 }

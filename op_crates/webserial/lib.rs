@@ -13,9 +13,7 @@ use serde::Deserialize;
 use std::borrow::Cow;
 use std::io::{Read, Write};
 
-struct WebSerialPortResource {
-  port: AsyncRefCell<Box<dyn serialport::SerialPort>>,
-}
+struct WebSerialPortResource(AsyncRefCell<Box<dyn serialport::SerialPort>>);
 
 impl Resource for WebSerialPortResource {
   fn name(&self) -> Cow<str> {
@@ -69,9 +67,7 @@ pub fn op_webserial_open(
     })
     .open()?;
 
-  let rid = state.resource_table.add(WebSerialPortResource {
-    port: AsyncRefCell::new(port),
-  });
+  let rid = state.resource_table.add(WebSerialPortResource(AsyncRefCell::new(port)));
 
   Ok(json!(rid))
 }
@@ -93,7 +89,7 @@ pub fn op_webserial_read(
     .resource_table
     .get::<WebSerialPortResource>(args.rid)
     .ok_or_else(bad_resource_id)?;
-  let mut port = RcRef::map(&resource, |v| &v.port)
+  let mut port = RcRef::map(&resource, |v| &v.0)
     .try_borrow_mut()
     .ok_or_else(resource_unavailable)?;
 
@@ -119,7 +115,7 @@ pub fn op_webserial_write(
     .resource_table
     .get::<WebSerialPortResource>(args.rid)
     .ok_or_else(bad_resource_id)?;
-  let mut port = RcRef::map(&resource, |v| &v.port)
+  let mut port = RcRef::map(&resource, |v| &v.0)
     .try_borrow_mut()
     .ok_or_else(resource_unavailable)?;
 
@@ -149,7 +145,7 @@ pub fn op_webserial_set_signals(
     .resource_table
     .get::<WebSerialPortResource>(args.rid)
     .ok_or_else(bad_resource_id)?;
-  let mut port = RcRef::map(&resource, |v| &v.port)
+  let mut port = RcRef::map(&resource, |v| &v.0)
     .try_borrow_mut()
     .ok_or_else(resource_unavailable)?;
 
@@ -189,7 +185,7 @@ pub fn op_webserial_get_signals(
     .resource_table
     .get::<WebSerialPortResource>(args.rid)
     .ok_or_else(bad_resource_id)?;
-  let mut port = RcRef::map(&resource, |v| &v.port)
+  let mut port = RcRef::map(&resource, |v| &v.0)
     .try_borrow_mut()
     .ok_or_else(resource_unavailable)?;
 

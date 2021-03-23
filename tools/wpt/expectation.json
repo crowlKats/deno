@@ -22,7 +22,11 @@
       "event-global-extra.window.js": true,
       "event-global.worker.js": true,
       "legacy-pre-activation-behavior.window.js": true,
-      "relatedTarget.window.js": true
+      "relatedTarget.window.js": true,
+      "Event-constructors.any.js": [
+        "Untitled 2",
+        "Untitled 3"
+      ]
     },
     "idlharness.any.js": false,
     "idlharness.window.js": false
@@ -616,6 +620,177 @@
         "DOMException-custom-bindings.any.js": [
           "does not inherit from Error: class-side"
         ]
+      }
+    }
+  },
+  "url": {
+    "historical.any.js": [
+      "<a> and <area>.searchParams should be undefined"
+    ],
+    "idlharness.any.js": false,
+    "url-constructor.any.js": [
+      "Parsing: <http://example.com/\ud800𐟾\udfff﷐﷏﷯ﷰ￾￿?\ud800𐟾\udfff﷐﷏﷯ﷰ￾￿> against <about:blank>",
+      "Parsing: </> against <file://h/C:/a/b>",
+      "Parsing: <file:\\\\//> against <about:blank>",
+      "Parsing: <file:\\\\\\\\> against <about:blank>",
+      "Parsing: <file:\\\\\\\\?fox> against <about:blank>",
+      "Parsing: <file:\\\\\\\\#guppy> against <about:blank>",
+      "Parsing: <file://spider///> against <about:blank>",
+      "Parsing: <file:\\\\localhost//> against <about:blank>",
+      "Parsing: <file://\\/localhost//cat> against <about:blank>",
+      "Parsing: <file://localhost//a//../..//> against <about:blank>",
+      "Parsing: </////mouse> against <file:///elephant>",
+      "Parsing: <\\/localhost//pig> against <file://lion/>",
+      "Parsing: <//localhost//pig> against <file://lion/>",
+      "Parsing: </..//localhost//pig> against <file://lion/>",
+      "Parsing: <C|> against <file://host/dir/file>",
+      "Parsing: <C|> against <file://host/D:/dir1/dir2/file>",
+      "Parsing: <C|#> against <file://host/dir/file>",
+      "Parsing: <C|?> against <file://host/dir/file>",
+      "Parsing: <C|/> against <file://host/dir/file>",
+      "Parsing: <C|\n/> against <file://host/dir/file>",
+      "Parsing: <C|\\> against <file://host/dir/file>",
+      "Parsing: </c:/foo/bar> against <file://host/path>",
+      "Parsing: <file://example.net/C:/> against <about:blank>",
+      "Parsing: <file://1.2.3.4/C:/> against <about:blank>",
+      "Parsing: <file://[1::8]/C:/> against <about:blank>",
+      "Parsing: <file://localhost//a//../..//foo> against <about:blank>",
+      "Parsing: <file://localhost////foo> against <about:blank>",
+      "Parsing: <file:////foo> against <about:blank>",
+      "Parsing: <file:////one/two> against <file:///>",
+      "Parsing: <////one/two> against <file:///>",
+      "Parsing: <file:///.//> against <file:////>",
+      "Parsing: <file:.//p> against <about:blank>",
+      "Parsing: <file:/.//p> against <about:blank>",
+      "Parsing: <non-spec:/.//> against <about:blank>",
+      "Parsing: <non-spec:/..//> against <about:blank>",
+      "Parsing: <non-spec:/a/..//> against <about:blank>",
+      "Parsing: <non-spec:/.//path> against <about:blank>",
+      "Parsing: <non-spec:/..//path> against <about:blank>",
+      "Parsing: <non-spec:/a/..//path> against <about:blank>",
+      "Parsing: </.//path> against <non-spec:/p>",
+      "Parsing: </..//path> against <non-spec:/p>",
+      "Parsing: <..//path> against <non-spec:/p>",
+      "Parsing: <a/..//path> against <non-spec:/p>",
+      "Parsing: <> against <non-spec:/..//p>",
+      "Parsing: <path> against <non-spec:/..//p>"
+    ],
+    "url-origin.any.js": [
+      "Origin parsing: <http://example.com/\ud800𐟾\udfff﷐﷏﷯ﷰ￾￿?\ud800𐟾\udfff﷐﷏﷯ﷰ￾￿> against <about:blank>"
+    ],
+    "url-searchparams.any.js": true,
+    "url-setters-stripping.any.js": [
+      "Setting protocol with leading U+0000 (https:)",
+      "Setting protocol with U+0000 before inserted colon (https:)",
+      "Setting port with leading U+0000 (https:)",
+      "Setting pathname with trailing U+0000 (https:)",
+      "Setting protocol with leading U+001F (https:)",
+      "Setting protocol with U+001F before inserted colon (https:)",
+      "Setting port with leading U+001F (https:)",
+      "Setting pathname with trailing U+001F (https:)",
+      "Setting protocol with leading U+0000 (wpt++:)",
+      "Setting protocol with U+0000 before inserted colon (wpt++:)",
+      "Setting port with leading U+0000 (wpt++:)",
+      "Setting pathname with trailing U+0000 (wpt++:)",
+      "Setting protocol with leading U+001F (wpt++:)",
+      "Setting protocol with U+001F before inserted colon (wpt++:)",
+      "Setting port with leading U+001F (wpt++:)",
+      "Setting pathname with trailing U+001F (wpt++:)"
+    ],
+    "url-tojson.any.js": true,
+    "urlencoded-parser.any.js": [
+      "request.formData() with input: ﻿test=﻿",
+      "response.formData() with input: ﻿test=﻿",
+      "request.formData() with input: †&†=x",
+      "response.formData() with input: †&†=x",
+      "request.formData() with input: _charset_=windows-1252&test=%C2x",
+      "response.formData() with input: _charset_=windows-1252&test=%C2x",
+      "request.formData() with input: %=a",
+      "response.formData() with input: %=a",
+      "request.formData() with input: %a=a",
+      "response.formData() with input: %a=a",
+      "request.formData() with input: %a_=a",
+      "response.formData() with input: %a_=a",
+      "request.formData() with input: id=0&value=%",
+      "response.formData() with input: id=0&value=%",
+      "request.formData() with input: b=%2sf%2a",
+      "response.formData() with input: b=%2sf%2a",
+      "request.formData() with input: b=%2%2af%2a",
+      "response.formData() with input: b=%2%2af%2a",
+      "request.formData() with input: b=%%2a",
+      "response.formData() with input: b=%%2a"
+    ],
+    "urlsearchparams-append.any.js": true,
+    "urlsearchparams-constructor.any.js": [
+      "URLSearchParams constructor, empty string as argument",
+      "Construct with 2 unpaired surrogates (no trailing)",
+      "Construct with 3 unpaired surrogates (no leading)",
+      "Construct with object with NULL, non-ASCII, and surrogate keys"
+    ],
+    "urlsearchparams-delete.any.js": true,
+    "urlsearchparams-foreach.any.js": [
+      "For-of Check",
+      "delete next param during iteration",
+      "delete current param during iteration",
+      "delete every param seen during iteration"
+    ],
+    "urlsearchparams-get.any.js": true,
+    "urlsearchparams-getall.any.js": true,
+    "urlsearchparams-has.any.js": true,
+    "urlsearchparams-set.any.js": true,
+    "urlsearchparams-sort.any.js": true,
+    "urlsearchparams-stringifier.any.js": true
+  },
+  "fetch": {
+    "api": {
+      "request": {
+        "request-structure.any.js": [
+          "Check destination attribute",
+          "Check referrer attribute",
+          "Check referrerPolicy attribute",
+          "Check mode attribute",
+          "Check credentials attribute",
+          "Check cache attribute",
+          "Check redirect attribute",
+          "Check integrity attribute",
+          "Check isReloadNavigation attribute",
+          "Check isHistoryNavigation attribute"
+        ]
+      }
+    }
+  },
+  "FileAPI": {
+    "blob": {
+      "Blob-array-buffer.any.js": true,
+      "Blob-stream.any.js": true,
+      "Blob-text.any.js": true,
+      "Blob-constructor.any.js": [
+        "Blob interface object",
+        "Passing a FrozenArray as the blobParts array should work (FrozenArray<MessagePort>)."
+      ],
+      "Blob-slice-overflow.any.js": true,
+      "Blob-slice.any.js": true
+    },
+    "file": {
+      "File-constructor.any.js": true
+    }
+  },
+  "html": {
+    "webappapis": {
+      "atob": {
+        "base64.any.js": true
+      },
+      "timers": {
+        "cleartimeout-clearinterval.any.js": true,
+        "missing-timeout-setinterval.any.js": true,
+        "negative-setinterval.any.js": true,
+        "negative-settimeout.any.js": true,
+        "type-long-setinterval.any.js": true,
+        "type-long-settimeout.any.js": true
+      },
+      "microtask-queuing": {
+        "queue-microtask-exceptions.any.js": true,
+        "queue-microtask.any.js": true
       }
     }
   }

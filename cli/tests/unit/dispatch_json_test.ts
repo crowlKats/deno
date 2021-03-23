@@ -19,28 +19,14 @@ unitTest(function malformedJsonControlBuffer(): void {
   assertMatch(resObj.err.message, /\bexpected value\b/);
 });
 
-unitTest(function invalidPromiseId(): void {
+unitTest(function invalidRequestId(): void {
   const opId = Deno.core.ops()["op_open_async"];
-  const argsObj = {
-    promiseId: "1. NEIN!",
-    path: "/tmp/P.I.S.C.I.X/yeah",
-    mode: 0o666,
-    options: {
-      read: true,
-      write: true,
-      create: true,
-      truncate: false,
-      append: false,
-      createNew: false,
-    },
-  };
-  const argsText = JSON.stringify(argsObj);
-  const argsBuf = new TextEncoder().encode(argsText);
-  const resBuf = Deno.core.send(opId, argsBuf);
+  const reqBuf = new Uint8Array([0, 0, 0, 0, 0, 0, 0]);
+  const resBuf = Deno.core.send(opId, reqBuf);
   const resText = new TextDecoder().decode(resBuf);
   const resObj = JSON.parse(resText);
   console.error(resText);
   assertStrictEquals(resObj.ok, undefined);
   assertStrictEquals(resObj.err.className, "TypeError");
-  assertMatch(resObj.err.message, /\bpromiseId\b/);
+  assertMatch(resObj.err.message, /\brequestId\b/);
 });

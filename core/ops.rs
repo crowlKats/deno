@@ -114,159 +114,6 @@ impl Default for OpTable {
   }
 }
 
-#[test]
-fn op_table() {
-  let state = Rc::new(RefCell::new(OpState::new()));
-
-  let foo_id;
-  let bar_id;
-  {
-    let op_table = &mut state.borrow_mut().op_table;
-    foo_id = op_table.register_op("foo", |_, _| Op::Sync(b"oof!"[..].into()));
-    assert_eq!(foo_id, 1);
-    bar_id = op_table.register_op("bar", |_, _| Op::Sync(b"rab!"[..].into()));
-    assert_eq!(bar_id, 2);
-  }
-
-  let foo_res = OpTable::route_op(foo_id, state.clone(), Default::default());
-  assert!(matches!(foo_res, Op::Sync(buf) if &*buf == b"oof!"));
-  let bar_res = OpTable::route_op(bar_id, state.clone(), Default::default());
-  assert!(matches!(bar_res, Op::Sync(buf) if &*buf == b"rab!"));
-
-  let catalog_res = OpTable::route_op(0, state, Default::default());
-  let mut catalog_entries = match catalog_res {
-    Op::Sync(buf) => serde_json::from_slice::<HashMap<String, OpId>>(&buf)
-      .map(|map| map.into_iter().collect::<Vec<_>>())
-      .unwrap(),
-    _ => panic!("unexpected `Op` variant"),
-  };
-  catalog_entries.sort_by(|(_, id1), (_, id2)| id1.partial_cmp(id2).unwrap());
-  assert_eq!(
-    catalog_entries,
-    vec![
-      ("ops".to_owned(), 0),
-      ("foo".to_owned(), 1),
-      ("bar".to_owned(), 2)
-    ]
-  )
-}
-
-/// Creates an op that passes data synchronously using JSON.
-///
-/// The provided function `op_fn` has the following parameters:
-/// * `&mut OpState`: the op state, can be used to read/write resources in the runtime from an op.
-/// * `Value`: the JSON value that is passed to the Rust function.
-/// * `&mut [ZeroCopyBuf]`: raw bytes passed along, usually not needed if the JSON value is used.
-///
-/// `op_fn` returns a JSON value, which is directly returned to JavaScript.
-///
-/// When registering an op like this...
-/// ```ignore
-/// let mut runtime = JsRuntime::new(...);
-/// runtime.register_op("hello", deno_core::json_op_sync(Self::hello_op));
-/// ```
-///
-/// ...it can be invoked from JS using the provided name, for example:
-/// ```js
-/// Deno.core.ops();
-/// let result = Deno.core.jsonOpSync("function_name", args);
-/// ```
-///
-/// The `Deno.core.ops()` statement is needed once before any op calls, for initialization.
-/// A more complete example is available in the examples directory.
-pub fn json_op_sync<F>(op_fn: F) -> Box<OpFn>
-where
-  F: Fn(&mut OpState, Value, &mut [ZeroCopyBuf]) -> Result<Value, AnyError>
-    + 'static,
-{
-  Box::new(move |state: Rc<RefCell<OpState>>, mut bufs: BufVec| -> Op {
-    let result = serde_json::from_slice(&bufs[0])
-      .map_err(AnyError::from)
-      .and_then(|args| op_fn(&mut state.borrow_mut(), args, &mut bufs[1..]));
-    let buf =
-      json_serialize_op_result(None, result, state.borrow().get_error_class_fn);
-    Op::Sync(buf)
-  })
-}
-
-/// Creates an op that passes data asynchronously using JSON.
-///
-/// The provided function `op_fn` has the following parameters:
-/// * `Rc<RefCell<OpState>`: the op state, can be used to read/write resources in the runtime from an op.
-/// * `Value`: the JSON value that is passed to the Rust function.
-/// * `BufVec`: raw bytes passed along, usually not needed if the JSON value is used.
-///
-/// `op_fn` returns a future, whose output is a JSON value. This value will be asynchronously
-/// returned to JavaScript.
-///
-/// When registering an op like this...
-/// ```ignore
-/// let mut runtime = JsRuntime::new(...);
-/// runtime.register_op("hello", deno_core::json_op_async(Self::hello_op));
-/// ```
-///
-/// ...it can be invoked from JS using the provided name, for example:
-/// ```js
-/// Deno.core.ops();
-/// let future = Deno.core.jsonOpAsync("function_name", args);
-/// ```
-///
-/// The `Deno.core.ops()` statement is needed once before any op calls, for initialization.
-/// A more complete example is available in the examples directory.
-pub fn json_op_async<F, R>(op_fn: F) -> Box<OpFn>
-where
-  F: Fn(Rc<RefCell<OpState>>, Value, BufVec) -> R + 'static,
-  R: Future<Output = Result<Value, AnyError>> + 'static,
-{
-  let try_dispatch_op =
-    move |state: Rc<RefCell<OpState>>, bufs: BufVec| -> Result<Op, AnyError> {
-      let args: Value = serde_json::from_slice(&bufs[0])?;
-      let promise_id = args
-        .get("promiseId")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| type_error("missing or invalid `promiseId`"))?;
-      let bufs = bufs[1..].into();
-      use crate::futures::FutureExt;
-      let fut = op_fn(state.clone(), args, bufs).map(move |result| {
-        json_serialize_op_result(
-          Some(promise_id),
-          result,
-          state.borrow().get_error_class_fn,
-        )
-      });
-      Ok(Op::Async(Box::pin(fut)))
-    };
-
-  Box::new(move |state: Rc<RefCell<OpState>>, bufs: BufVec| -> Op {
-    match try_dispatch_op(state.clone(), bufs) {
-      Ok(op) => op,
-      Err(err) => Op::Sync(json_serialize_op_result(
-        None,
-        Err(err),
-        state.borrow().get_error_class_fn,
-      )),
-    }
-  })
-}
-
-fn json_serialize_op_result(
-  promise_id: Option<u64>,
-  result: Result<serde_json::Value, AnyError>,
-  get_error_class_fn: crate::runtime::GetErrorClassFn,
-) -> Box<[u8]> {
-  let value = match result {
-    Ok(v) => serde_json::json!({ "ok": v, "promiseId": promise_id }),
-    Err(err) => serde_json::json!({
-      "promiseId": promise_id ,
-      "err": {
-        "className": (get_error_class_fn)(&err),
-        "message": err.to_string(),
-      }
-    }),
-  };
-  serde_json::to_vec(&value).unwrap().into_boxed_slice()
-}
-
 /// Return map of resources with id as key
 /// and string representation as value.
 ///
@@ -303,4 +150,46 @@ pub fn op_close(
     .ok_or_else(bad_resource_id)?;
 
   Ok(json!({}))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn op_table() {
+    let state = Rc::new(RefCell::new(OpState::new()));
+
+    let foo_id;
+    let bar_id;
+    {
+      let op_table = &mut state.borrow_mut().op_table;
+      foo_id = op_table.register_op("foo", |_, _| Op::Sync(b"oof!"[..].into()));
+      assert_eq!(foo_id, 1);
+      bar_id = op_table.register_op("bar", |_, _| Op::Sync(b"rab!"[..].into()));
+      assert_eq!(bar_id, 2);
+    }
+
+    let foo_res = OpTable::route_op(foo_id, state.clone(), Default::default());
+    assert!(matches!(foo_res, Op::Sync(buf) if &*buf == b"oof!"));
+    let bar_res = OpTable::route_op(bar_id, state.clone(), Default::default());
+    assert!(matches!(bar_res, Op::Sync(buf) if &*buf == b"rab!"));
+
+    let catalog_res = OpTable::route_op(0, state, Default::default());
+    let mut catalog_entries = match catalog_res {
+      Op::Sync(buf) => serde_json::from_slice::<HashMap<String, OpId>>(&buf)
+        .map(|map| map.into_iter().collect::<Vec<_>>())
+        .unwrap(),
+      _ => panic!("unexpected `Op` variant"),
+    };
+    catalog_entries.sort_by(|(_, id1), (_, id2)| id1.partial_cmp(id2).unwrap());
+    assert_eq!(
+      catalog_entries,
+      vec![
+        ("ops".to_owned(), 0),
+        ("foo".to_owned(), 1),
+        ("bar".to_owned(), 2)
+      ]
+    );
+  }
 }

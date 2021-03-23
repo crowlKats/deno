@@ -1,10 +1,13 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
+use super::analysis::CodeLensSource;
 use super::analysis::ResolvedDependency;
+use super::analysis::ResolvedDependencyErr;
+use super::config;
+use super::language_server;
 use super::language_server::StateSnapshot;
 use super::text;
 use super::text::LineIndex;
-use super::utils;
 
 use crate::media_type::MediaType;
 use crate::tokio_util::create_basic_runtime;
@@ -15,8 +18,9 @@ use crate::tsc_config::TsConfig;
 use deno_core::error::anyhow;
 use deno_core::error::custom_error;
 use deno_core::error::AnyError;
-use deno_core::futures::Future;
 use deno_core::json_op_sync;
+use deno_core::resolve_url;
+use deno_core::serde::de;
 use deno_core::serde::Deserialize;
 use deno_core::serde::Serialize;
 use deno_core::serde_json;
@@ -27,15 +31,19 @@ use deno_core::JsRuntime;
 use deno_core::ModuleSpecifier;
 use deno_core::OpFn;
 use deno_core::RuntimeOptions;
-use lspower::lsp_types;
+use lspower::lsp;
 use regex::Captures;
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::thread;
 use text_size::TextSize;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+
+const FILE_EXTENSION_KIND_MODIFIERS: &[&str] =
+  &[".d.ts", ".ts", ".tsx", ".js", ".jsx", ".json"];
 
 type Request = (
   RequestMethod,
@@ -69,16 +77,19 @@ impl TsServer {
     Self(tx)
   }
 
-  pub async fn request(
+  pub async fn request<R>(
     &self,
     snapshot: StateSnapshot,
     req: RequestMethod,
-  ) -> Result<Value, AnyError> {
+  ) -> Result<R, AnyError>
+  where
+    R: de::DeserializeOwned,
+  {
     let (tx, rx) = oneshot::channel::<Result<Value, AnyError>>();
     if self.0.send((req, snapshot, tx)).is_err() {
       return Err(anyhow!("failed to send request to tsc thread"));
     }
-    rx.await?
+    rx.await?.map(|v| serde_json::from_value::<R>(v).unwrap())
   }
 }
 
@@ -87,7 +98,55 @@ impl TsServer {
 #[derive(Debug, Clone)]
 pub struct AssetDocument {
   pub text: String,
+  pub length: usize,
   pub line_index: LineIndex,
+}
+
+impl AssetDocument {
+  pub fn new<T: AsRef<str>>(text: T) -> Self {
+    let text = text.as_ref();
+    Self {
+      text: text.to_string(),
+      length: text.encode_utf16().count(),
+      line_index: LineIndex::new(text),
+    }
+  }
+}
+
+#[derive(Debug, Clone)]
+pub struct Assets(HashMap<ModuleSpecifier, Option<AssetDocument>>);
+
+impl Default for Assets {
+  fn default() -> Self {
+    let assets = tsc::STATIC_ASSETS
+      .iter()
+      .map(|(k, v)| {
+        let url_str = format!("asset:///{}", k);
+        let specifier = resolve_url(&url_str).unwrap();
+        let asset = AssetDocument::new(v);
+        (specifier, Some(asset))
+      })
+      .collect();
+    Self(assets)
+  }
+}
+
+impl Assets {
+  pub fn contains_key(&self, k: &ModuleSpecifier) -> bool {
+    self.0.contains_key(k)
+  }
+
+  pub fn get(&self, k: &ModuleSpecifier) -> Option<&Option<AssetDocument>> {
+    self.0.get(k)
+  }
+
+  pub fn insert(
+    &mut self,
+    k: ModuleSpecifier,
+    v: Option<AssetDocument>,
+  ) -> Option<Option<AssetDocument>> {
+    self.0.insert(k, v)
+  }
 }
 
 /// Optionally returns an internal asset, first checking for any static assets
@@ -96,51 +155,32 @@ pub struct AssetDocument {
 pub async fn get_asset(
   specifier: &ModuleSpecifier,
   ts_server: &TsServer,
-  state_snapshot: &mut StateSnapshot,
+  state_snapshot: StateSnapshot,
 ) -> Result<Option<AssetDocument>, AnyError> {
   let specifier_str = specifier.to_string().replace("asset:///", "");
   if let Some(text) = tsc::get_asset(&specifier_str) {
-    let maybe_asset = Some(AssetDocument {
-      line_index: LineIndex::new(text),
-      text: text.to_string(),
-    });
-    state_snapshot
-      .assets
-      .insert(specifier.clone(), maybe_asset.clone());
+    let maybe_asset = Some(AssetDocument::new(text));
     Ok(maybe_asset)
   } else {
     let res = ts_server
-      .request(
-        state_snapshot.clone(),
-        RequestMethod::GetAsset(specifier.clone()),
-      )
+      .request(state_snapshot, RequestMethod::GetAsset(specifier.clone()))
       .await?;
     let maybe_text: Option<String> = serde_json::from_value(res)?;
     let maybe_asset = if let Some(text) = maybe_text {
-      Some(AssetDocument {
-        line_index: LineIndex::new(&text),
-        text,
-      })
+      Some(AssetDocument::new(text))
     } else {
       None
     };
-    state_snapshot
-      .assets
-      .insert(specifier.clone(), maybe_asset.clone());
     Ok(maybe_asset)
   }
 }
 
-fn display_parts_to_string(
-  maybe_parts: Option<Vec<SymbolDisplayPart>>,
-) -> Option<String> {
-  maybe_parts.map(|parts| {
-    parts
-      .into_iter()
-      .map(|p| p.text)
-      .collect::<Vec<String>>()
-      .join("")
-  })
+fn display_parts_to_string(parts: &[SymbolDisplayPart]) -> String {
+  parts
+    .iter()
+    .map(|p| p.text.to_string())
+    .collect::<Vec<String>>()
+    .join("")
 }
 
 fn get_tag_body_text(tag: &JSDocTagInfo) -> Option<String> {
@@ -241,7 +281,12 @@ fn replace_links(text: &str) -> String {
     .to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+fn parse_kind_modifier(kind_modifiers: &str) -> HashSet<&str> {
+  let re = Regex::new(r",|\s+").unwrap();
+  re.split(kind_modifiers).collect()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ScriptElementKind {
   #[serde(rename = "")]
   Unknown,
@@ -313,56 +358,72 @@ pub enum ScriptElementKind {
   String,
 }
 
-impl From<ScriptElementKind> for lsp_types::CompletionItemKind {
-  fn from(kind: ScriptElementKind) -> Self {
-    use lspower::lsp_types::CompletionItemKind;
+impl Default for ScriptElementKind {
+  fn default() -> Self {
+    Self::Unknown
+  }
+}
 
+impl From<ScriptElementKind> for lsp::CompletionItemKind {
+  fn from(kind: ScriptElementKind) -> Self {
     match kind {
       ScriptElementKind::PrimitiveType | ScriptElementKind::Keyword => {
-        CompletionItemKind::Keyword
+        lsp::CompletionItemKind::Keyword
       }
-      ScriptElementKind::ConstElement => CompletionItemKind::Constant,
-      ScriptElementKind::LetElement
+      ScriptElementKind::ConstElement
+      | ScriptElementKind::LetElement
       | ScriptElementKind::VariableElement
       | ScriptElementKind::LocalVariableElement
-      | ScriptElementKind::Alias => CompletionItemKind::Variable,
+      | ScriptElementKind::Alias
+      | ScriptElementKind::ParameterElement => {
+        lsp::CompletionItemKind::Variable
+      }
       ScriptElementKind::MemberVariableElement
       | ScriptElementKind::MemberGetAccessorElement
       | ScriptElementKind::MemberSetAccessorElement => {
-        CompletionItemKind::Field
+        lsp::CompletionItemKind::Field
       }
-      ScriptElementKind::FunctionElement => CompletionItemKind::Function,
+      ScriptElementKind::FunctionElement
+      | ScriptElementKind::LocalFunctionElement => {
+        lsp::CompletionItemKind::Function
+      }
       ScriptElementKind::MemberFunctionElement
       | ScriptElementKind::ConstructSignatureElement
       | ScriptElementKind::CallSignatureElement
-      | ScriptElementKind::IndexSignatureElement => CompletionItemKind::Method,
-      ScriptElementKind::EnumElement => CompletionItemKind::Enum,
+      | ScriptElementKind::IndexSignatureElement => {
+        lsp::CompletionItemKind::Method
+      }
+      ScriptElementKind::EnumElement => lsp::CompletionItemKind::Enum,
+      ScriptElementKind::EnumMemberElement => {
+        lsp::CompletionItemKind::EnumMember
+      }
       ScriptElementKind::ModuleElement
-      | ScriptElementKind::ExternalModuleName => CompletionItemKind::Module,
+      | ScriptElementKind::ExternalModuleName => {
+        lsp::CompletionItemKind::Module
+      }
       ScriptElementKind::ClassElement | ScriptElementKind::TypeElement => {
-        CompletionItemKind::Class
+        lsp::CompletionItemKind::Class
       }
-      ScriptElementKind::InterfaceElement => CompletionItemKind::Interface,
-      ScriptElementKind::Warning | ScriptElementKind::ScriptElement => {
-        CompletionItemKind::File
-      }
-      ScriptElementKind::Directory => CompletionItemKind::Folder,
-      ScriptElementKind::String => CompletionItemKind::Constant,
-      _ => CompletionItemKind::Property,
+      ScriptElementKind::InterfaceElement => lsp::CompletionItemKind::Interface,
+      ScriptElementKind::Warning => lsp::CompletionItemKind::Text,
+      ScriptElementKind::ScriptElement => lsp::CompletionItemKind::File,
+      ScriptElementKind::Directory => lsp::CompletionItemKind::Folder,
+      ScriptElementKind::String => lsp::CompletionItemKind::Constant,
+      _ => lsp::CompletionItemKind::Property,
     }
   }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TextSpan {
-  start: u32,
-  length: u32,
+  pub start: u32,
+  pub length: u32,
 }
 
 impl TextSpan {
-  pub fn to_range(&self, line_index: &LineIndex) -> lsp_types::Range {
-    lsp_types::Range {
+  pub fn to_range(&self, line_index: &LineIndex) -> lsp::Range {
+    lsp::Range {
       start: line_index.position_tsc(self.start.into()),
       end: line_index.position_tsc(TextSize::from(self.start + self.length)),
     }
@@ -395,20 +456,24 @@ pub struct QuickInfo {
 }
 
 impl QuickInfo {
-  pub fn to_hover(&self, line_index: &LineIndex) -> lsp_types::Hover {
-    let mut contents = Vec::<lsp_types::MarkedString>::new();
-    if let Some(display_string) =
-      display_parts_to_string(self.display_parts.clone())
+  pub fn to_hover(&self, line_index: &LineIndex) -> lsp::Hover {
+    let mut contents = Vec::<lsp::MarkedString>::new();
+    if let Some(display_string) = self
+      .display_parts
+      .clone()
+      .map(|p| display_parts_to_string(&p))
     {
-      contents.push(lsp_types::MarkedString::from_language_code(
+      contents.push(lsp::MarkedString::from_language_code(
         "typescript".to_string(),
         display_string,
       ));
     }
-    if let Some(documentation) =
-      display_parts_to_string(self.documentation.clone())
+    if let Some(documentation) = self
+      .documentation
+      .clone()
+      .map(|p| display_parts_to_string(&p))
     {
-      contents.push(lsp_types::MarkedString::from_markdown(documentation));
+      contents.push(lsp::MarkedString::from_markdown(documentation));
     }
     if let Some(tags) = &self.tags {
       let tags_preview = tags
@@ -417,14 +482,14 @@ impl QuickInfo {
         .collect::<Vec<String>>()
         .join("  \n\n");
       if !tags_preview.is_empty() {
-        contents.push(lsp_types::MarkedString::from_markdown(format!(
+        contents.push(lsp::MarkedString::from_markdown(format!(
           "\n\n{}",
           tags_preview
         )));
       }
     }
-    lsp_types::Hover {
-      contents: lsp_types::HoverContents::Array(contents),
+    lsp::Hover {
+      contents: lsp::HoverContents::Array(contents),
       range: Some(self.text_span.to_range(line_index)),
     }
   }
@@ -442,40 +507,107 @@ pub struct DocumentSpan {
 }
 
 impl DocumentSpan {
-  pub async fn to_link<F, Fut>(
+  pub(crate) async fn to_link(
     &self,
     line_index: &LineIndex,
-    index_provider: F,
-  ) -> Option<lsp_types::LocationLink>
-  where
-    F: Fn(ModuleSpecifier) -> Fut,
-    Fut: Future<Output = Result<LineIndex, AnyError>>,
-  {
-    let target_specifier =
-      ModuleSpecifier::resolve_url(&self.file_name).unwrap();
-    if let Ok(target_line_index) = index_provider(target_specifier).await {
-      let target_uri = utils::normalize_file_name(&self.file_name).unwrap();
-      let (target_range, target_selection_range) =
-        if let Some(context_span) = &self.context_span {
-          (
-            context_span.to_range(&target_line_index),
-            self.text_span.to_range(&target_line_index),
-          )
-        } else {
-          (
-            self.text_span.to_range(&target_line_index),
-            self.text_span.to_range(&target_line_index),
-          )
-        };
-      let link = lsp_types::LocationLink {
-        origin_selection_range: Some(self.text_span.to_range(line_index)),
-        target_uri,
-        target_range,
-        target_selection_range,
+    language_server: &mut language_server::Inner,
+  ) -> Option<lsp::LocationLink> {
+    let target_specifier = resolve_url(&self.file_name).unwrap();
+    let target_line_index = language_server
+      .get_line_index(target_specifier.clone())
+      .await
+      .ok()?;
+    let target_uri = language_server
+      .url_map
+      .normalize_specifier(&target_specifier)
+      .unwrap();
+    let (target_range, target_selection_range) =
+      if let Some(context_span) = &self.context_span {
+        (
+          context_span.to_range(&target_line_index),
+          self.text_span.to_range(&target_line_index),
+        )
+      } else {
+        (
+          self.text_span.to_range(&target_line_index),
+          self.text_span.to_range(&target_line_index),
+        )
       };
-      Some(link)
+    let origin_selection_range =
+      if let Some(original_context_span) = &self.original_context_span {
+        Some(original_context_span.to_range(line_index))
+      } else if let Some(original_text_span) = &self.original_text_span {
+        Some(original_text_span.to_range(line_index))
+      } else {
+        None
+      };
+    let link = lsp::LocationLink {
+      origin_selection_range,
+      target_uri,
+      target_range,
+      target_selection_range,
+    };
+    Some(link)
+  }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NavigationTree {
+  pub text: String,
+  pub kind: ScriptElementKind,
+  pub kind_modifiers: String,
+  pub spans: Vec<TextSpan>,
+  pub name_span: Option<TextSpan>,
+  pub child_items: Option<Vec<NavigationTree>>,
+}
+
+impl NavigationTree {
+  pub fn to_code_lens(
+    &self,
+    line_index: &LineIndex,
+    specifier: &ModuleSpecifier,
+    source: &CodeLensSource,
+  ) -> lsp::CodeLens {
+    let range = if let Some(name_span) = &self.name_span {
+      name_span.to_range(line_index)
+    } else if !self.spans.is_empty() {
+      let span = &self.spans[0];
+      span.to_range(line_index)
     } else {
-      None
+      lsp::Range::default()
+    };
+    lsp::CodeLens {
+      range,
+      command: None,
+      data: Some(json!({
+        "specifier": specifier,
+        "source": source
+      })),
+    }
+  }
+
+  pub fn walk<F>(&self, callback: &F)
+  where
+    F: Fn(&NavigationTree, Option<&NavigationTree>),
+  {
+    callback(self, None);
+    if let Some(child_items) = &self.child_items {
+      for child in child_items {
+        child.walk_child(callback, self);
+      }
+    }
+  }
+
+  fn walk_child<F>(&self, callback: &F, parent: &NavigationTree)
+  where
+    F: Fn(&NavigationTree, Option<&NavigationTree>),
+  {
+    callback(self, Some(parent));
+    if let Some(child_items) = &self.child_items {
+      for child in child_items {
+        child.walk_child(callback, self);
+      }
     }
   }
 }
@@ -488,6 +620,35 @@ pub struct ImplementationLocation {
   // ImplementationLocation props
   kind: ScriptElementKind,
   display_parts: Vec<SymbolDisplayPart>,
+}
+
+impl ImplementationLocation {
+  pub(crate) fn to_location(
+    &self,
+    line_index: &LineIndex,
+    language_server: &mut language_server::Inner,
+  ) -> lsp::Location {
+    let specifier = resolve_url(&self.document_span.file_name).unwrap();
+    let uri = language_server
+      .url_map
+      .normalize_specifier(&specifier)
+      .unwrap();
+    lsp::Location {
+      uri,
+      range: self.document_span.text_span.to_range(line_index),
+    }
+  }
+
+  pub(crate) async fn to_link(
+    &self,
+    line_index: &LineIndex,
+    language_server: &mut language_server::Inner,
+  ) -> Option<lsp::LocationLink> {
+    self
+      .document_span
+      .to_link(line_index, language_server)
+      .await
+  }
 }
 
 #[derive(Debug, Deserialize)]
@@ -505,60 +666,47 @@ pub struct RenameLocations {
 }
 
 impl RenameLocations {
-  pub async fn into_workspace_edit<F, Fut, V>(
+  pub(crate) async fn into_workspace_edit(
     self,
     new_name: &str,
-    index_provider: F,
-    version_provider: V,
-  ) -> Result<lsp_types::WorkspaceEdit, AnyError>
-  where
-    F: Fn(ModuleSpecifier) -> Fut,
-    Fut: Future<Output = Result<LineIndex, AnyError>>,
-    V: Fn(ModuleSpecifier) -> Option<i32>,
-  {
-    let mut text_document_edit_map: HashMap<Url, lsp_types::TextDocumentEdit> =
+    language_server: &mut language_server::Inner,
+  ) -> Result<lsp::WorkspaceEdit, AnyError> {
+    let mut text_document_edit_map: HashMap<Url, lsp::TextDocumentEdit> =
       HashMap::new();
     for location in self.locations.iter() {
-      let uri = utils::normalize_file_name(&location.document_span.file_name)?;
-      let specifier =
-        ModuleSpecifier::resolve_url(&location.document_span.file_name)?;
+      let specifier = resolve_url(&location.document_span.file_name)?;
+      let uri = language_server.url_map.normalize_specifier(&specifier)?;
 
       // ensure TextDocumentEdit for `location.file_name`.
       if text_document_edit_map.get(&uri).is_none() {
         text_document_edit_map.insert(
           uri.clone(),
-          lsp_types::TextDocumentEdit {
-            text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
+          lsp::TextDocumentEdit {
+            text_document: lsp::OptionalVersionedTextDocumentIdentifier {
               uri: uri.clone(),
-              version: version_provider(specifier.clone()),
+              version: language_server.document_version(specifier.clone()),
             },
-            edits: Vec::<
-              lsp_types::OneOf<
-                lsp_types::TextEdit,
-                lsp_types::AnnotatedTextEdit,
-              >,
-            >::new(),
+            edits:
+              Vec::<lsp::OneOf<lsp::TextEdit, lsp::AnnotatedTextEdit>>::new(),
           },
         );
       }
 
       // push TextEdit for ensured `TextDocumentEdit.edits`.
       let document_edit = text_document_edit_map.get_mut(&uri).unwrap();
-      document_edit
-        .edits
-        .push(lsp_types::OneOf::Left(lsp_types::TextEdit {
-          range: location
-            .document_span
-            .text_span
-            .to_range(&index_provider(specifier.clone()).await?),
-          new_text: new_name.to_string(),
-        }));
+      document_edit.edits.push(lsp::OneOf::Left(lsp::TextEdit {
+        range: location
+          .document_span
+          .text_span
+          .to_range(&language_server.get_line_index(specifier.clone()).await?),
+        new_text: new_name.to_string(),
+      }));
     }
 
-    Ok(lsp_types::WorkspaceEdit {
+    Ok(lsp::WorkspaceEdit {
       change_annotations: None,
       changes: None,
-      document_changes: Some(lsp_types::DocumentChanges::Edits(
+      document_changes: Some(lsp::DocumentChanges::Edits(
         text_document_edit_map.values().cloned().collect(),
       )),
     })
@@ -607,27 +755,21 @@ pub struct DefinitionInfoAndBoundSpan {
 }
 
 impl DefinitionInfoAndBoundSpan {
-  pub async fn to_definition<F, Fut>(
+  pub(crate) async fn to_definition(
     &self,
     line_index: &LineIndex,
-    index_provider: F,
-  ) -> Option<lsp_types::GotoDefinitionResponse>
-  where
-    F: Fn(ModuleSpecifier) -> Fut + Clone,
-    Fut: Future<Output = Result<LineIndex, AnyError>>,
-  {
+    language_server: &mut language_server::Inner,
+  ) -> Option<lsp::GotoDefinitionResponse> {
     if let Some(definitions) = &self.definitions {
-      let mut location_links = Vec::<lsp_types::LocationLink>::new();
+      let mut location_links = Vec::<lsp::LocationLink>::new();
       for di in definitions {
-        if let Some(link) = di
-          .document_span
-          .to_link(line_index, index_provider.clone())
-          .await
+        if let Some(link) =
+          di.document_span.to_link(line_index, language_server).await
         {
           location_links.push(link);
         }
       }
-      Some(lsp_types::GotoDefinitionResponse::Link(location_links))
+      Some(lsp::GotoDefinitionResponse::Link(location_links))
     } else {
       None
     }
@@ -645,21 +787,108 @@ impl DocumentHighlights {
   pub fn to_highlight(
     &self,
     line_index: &LineIndex,
-  ) -> Vec<lsp_types::DocumentHighlight> {
+  ) -> Vec<lsp::DocumentHighlight> {
     self
       .highlight_spans
       .iter()
-      .map(|hs| lsp_types::DocumentHighlight {
+      .map(|hs| lsp::DocumentHighlight {
         range: hs.text_span.to_range(line_index),
         kind: match hs.kind {
           HighlightSpanKind::WrittenReference => {
-            Some(lsp_types::DocumentHighlightKind::Write)
+            Some(lsp::DocumentHighlightKind::Write)
           }
-          _ => Some(lsp_types::DocumentHighlightKind::Read),
+          _ => Some(lsp::DocumentHighlightKind::Read),
         },
       })
       .collect()
   }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TextChange {
+  span: TextSpan,
+  new_text: String,
+}
+
+impl TextChange {
+  pub fn as_text_edit(
+    &self,
+    line_index: &LineIndex,
+  ) -> lsp::OneOf<lsp::TextEdit, lsp::AnnotatedTextEdit> {
+    lsp::OneOf::Left(lsp::TextEdit {
+      range: self.span.to_range(line_index),
+      new_text: self.new_text.clone(),
+    })
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTextChanges {
+  file_name: String,
+  text_changes: Vec<TextChange>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  is_new_file: Option<bool>,
+}
+
+impl FileTextChanges {
+  pub(crate) async fn to_text_document_edit(
+    &self,
+    language_server: &mut language_server::Inner,
+  ) -> Result<lsp::TextDocumentEdit, AnyError> {
+    let specifier = resolve_url(&self.file_name)?;
+    let line_index = language_server.get_line_index(specifier.clone()).await?;
+    let edits = self
+      .text_changes
+      .iter()
+      .map(|tc| tc.as_text_edit(&line_index))
+      .collect();
+    Ok(lsp::TextDocumentEdit {
+      text_document: lsp::OptionalVersionedTextDocumentIdentifier {
+        uri: specifier.clone(),
+        version: language_server.document_version(specifier),
+      },
+      edits,
+    })
+  }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeAction {
+  description: String,
+  changes: Vec<FileTextChanges>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  commands: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeFixAction {
+  pub description: String,
+  pub changes: Vec<FileTextChanges>,
+  // These are opaque types that should just be passed back when applying the
+  // action.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub commands: Option<Vec<Value>>,
+  pub fix_name: String,
+  // It appears currently that all fixIds are strings, but the protocol
+  // specifies an opaque type, the problem is that we need to use the id as a
+  // hash key, and `Value` does not implement hash (and it could provide a false
+  // positive depending on JSON whitespace, so we deserialize it but it might
+  // break in the future)
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub fix_id: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub fix_all_description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CombinedCodeActions {
+  pub changes: Vec<FileTextChanges>,
+  pub commands: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -673,10 +902,17 @@ pub struct ReferenceEntry {
 }
 
 impl ReferenceEntry {
-  pub fn to_location(&self, line_index: &LineIndex) -> lsp_types::Location {
-    let uri =
-      utils::normalize_file_name(&self.document_span.file_name).unwrap();
-    lsp_types::Location {
+  pub(crate) fn to_location(
+    &self,
+    line_index: &LineIndex,
+    language_server: &mut language_server::Inner,
+  ) -> lsp::Location {
+    let specifier = resolve_url(&self.document_span.file_name).unwrap();
+    let uri = language_server
+      .url_map
+      .normalize_specifier(&specifier)
+      .unwrap();
+    lsp::Location {
       uri,
       range: self.document_span.text_span.to_range(line_index),
     }
@@ -685,99 +921,393 @@ impl ReferenceEntry {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CompletionEntryDetails {
+  name: String,
+  kind: ScriptElementKind,
+  kind_modifiers: String,
+  display_parts: Vec<SymbolDisplayPart>,
+  documentation: Option<Vec<SymbolDisplayPart>>,
+  tags: Option<Vec<JSDocTagInfo>>,
+  code_actions: Option<Vec<CodeAction>>,
+  source: Option<Vec<SymbolDisplayPart>>,
+}
+
+impl CompletionEntryDetails {
+  pub fn as_completion_item(
+    &self,
+    original_item: &lsp::CompletionItem,
+  ) -> lsp::CompletionItem {
+    let detail = if original_item.detail.is_some() {
+      original_item.detail.clone()
+    } else if !self.display_parts.is_empty() {
+      Some(replace_links(&display_parts_to_string(&self.display_parts)))
+    } else {
+      None
+    };
+    let documentation = if let Some(parts) = &self.documentation {
+      let mut value = display_parts_to_string(parts);
+      if let Some(tags) = &self.tags {
+        let tag_documentation = tags
+          .iter()
+          .map(get_tag_documentation)
+          .collect::<Vec<String>>()
+          .join("");
+        value = format!("{}\n\n{}", value, tag_documentation);
+      }
+      Some(lsp::Documentation::MarkupContent(lsp::MarkupContent {
+        kind: lsp::MarkupKind::Markdown,
+        value,
+      }))
+    } else {
+      None
+    };
+    // TODO(@kitsonk) add `self.code_actions`
+    // TODO(@kitsonk) add `use_code_snippet`
+
+    lsp::CompletionItem {
+      data: None,
+      detail,
+      documentation,
+      ..original_item.clone()
+    }
+  }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompletionInfo {
   entries: Vec<CompletionEntry>,
+  is_global_completion: bool,
   is_member_completion: bool,
+  is_new_identifier_location: bool,
+  metadata: Option<Value>,
+  optional_replacement_span: Option<TextSpan>,
 }
 
 impl CompletionInfo {
-  pub fn into_completion_response(
-    self,
+  pub fn as_completion_response(
+    &self,
     line_index: &LineIndex,
-  ) -> lsp_types::CompletionResponse {
+    settings: &config::CompletionSettings,
+    specifier: &ModuleSpecifier,
+    position: u32,
+  ) -> lsp::CompletionResponse {
     let items = self
       .entries
-      .into_iter()
-      .map(|entry| entry.into_completion_item(line_index))
+      .iter()
+      .map(|entry| {
+        entry
+          .as_completion_item(line_index, self, settings, specifier, position)
+      })
       .collect();
-    lsp_types::CompletionResponse::Array(items)
+    let is_incomplete = self
+      .metadata
+      .clone()
+      .map(|v| {
+        v.as_object()
+          .unwrap()
+          .get("isIncomplete")
+          .unwrap_or(&json!(false))
+          .as_bool()
+          .unwrap()
+      })
+      .unwrap_or(false);
+    lsp::CompletionResponse::List(lsp::CompletionList {
+      is_incomplete,
+      items,
+    })
+  }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionItemData {
+  pub specifier: ModuleSpecifier,
+  pub position: u32,
+  pub name: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub data: Option<Value>,
+  pub use_code_snippet: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionEntry {
+  name: String,
+  kind: ScriptElementKind,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  kind_modifiers: Option<String>,
+  sort_text: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  insert_text: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  replacement_span: Option<TextSpan>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  has_action: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  source: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  is_recommended: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  is_from_unchecked_file: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  data: Option<Value>,
+}
+
+impl CompletionEntry {
+  fn get_commit_characters(
+    &self,
+    info: &CompletionInfo,
+    settings: &config::CompletionSettings,
+  ) -> Option<Vec<String>> {
+    if info.is_new_identifier_location {
+      return None;
+    }
+
+    let mut commit_characters = vec![];
+    match self.kind {
+      ScriptElementKind::MemberGetAccessorElement
+      | ScriptElementKind::MemberSetAccessorElement
+      | ScriptElementKind::ConstructSignatureElement
+      | ScriptElementKind::CallSignatureElement
+      | ScriptElementKind::IndexSignatureElement
+      | ScriptElementKind::EnumElement
+      | ScriptElementKind::InterfaceElement => {
+        commit_characters.push(".");
+        commit_characters.push(";");
+      }
+      ScriptElementKind::ModuleElement
+      | ScriptElementKind::Alias
+      | ScriptElementKind::ConstElement
+      | ScriptElementKind::LetElement
+      | ScriptElementKind::VariableElement
+      | ScriptElementKind::LocalVariableElement
+      | ScriptElementKind::MemberVariableElement
+      | ScriptElementKind::ClassElement
+      | ScriptElementKind::FunctionElement
+      | ScriptElementKind::MemberFunctionElement
+      | ScriptElementKind::Keyword
+      | ScriptElementKind::ParameterElement => {
+        commit_characters.push(".");
+        commit_characters.push(",");
+        commit_characters.push(";");
+        if !settings.complete_function_calls {
+          commit_characters.push("(");
+        }
+      }
+      _ => (),
+    }
+
+    if commit_characters.is_empty() {
+      None
+    } else {
+      Some(commit_characters.into_iter().map(String::from).collect())
+    }
+  }
+
+  fn get_filter_text(&self) -> Option<String> {
+    // TODO(@kitsonk) this is actually quite a bit more complex.
+    // See `MyCompletionItem.getFilterText` in vscode completion.ts.
+    if self.name.starts_with('#') && self.insert_text.is_none() {
+      return Some(self.name.clone());
+    }
+
+    if let Some(insert_text) = &self.insert_text {
+      if insert_text.starts_with("this.") {
+        return None;
+      }
+      if insert_text.starts_with('[') {
+        let re = Regex::new(r#"^\[['"](.+)['"]\]$"#).unwrap();
+        let insert_text = re.replace(insert_text, ".$1").to_string();
+        return Some(insert_text);
+      }
+    }
+
+    self.insert_text.clone()
+  }
+
+  pub fn as_completion_item(
+    &self,
+    line_index: &LineIndex,
+    info: &CompletionInfo,
+    settings: &config::CompletionSettings,
+    specifier: &ModuleSpecifier,
+    position: u32,
+  ) -> lsp::CompletionItem {
+    let mut label = self.name.clone();
+    let mut kind: Option<lsp::CompletionItemKind> =
+      Some(self.kind.clone().into());
+
+    let sort_text = if self.source.is_some() {
+      Some(format!("\u{ffff}{}", self.sort_text))
+    } else {
+      Some(self.sort_text.clone())
+    };
+
+    let preselect = self.is_recommended;
+    let use_code_snippet = settings.complete_function_calls
+      && (kind == Some(lsp::CompletionItemKind::Function)
+        || kind == Some(lsp::CompletionItemKind::Method));
+    // TODO(@kitsonk) missing from types: https://github.com/gluon-lang/lsp-types/issues/204
+    let _commit_characters = self.get_commit_characters(info, settings);
+    let mut insert_text = self.insert_text.clone();
+    let range = self.replacement_span.clone();
+    let mut filter_text = self.get_filter_text();
+    let mut tags = None;
+    let mut detail = None;
+
+    if let Some(kind_modifiers) = &self.kind_modifiers {
+      let kind_modifiers = parse_kind_modifier(kind_modifiers);
+      if kind_modifiers.contains("optional") {
+        if insert_text.is_none() {
+          insert_text = Some(label.clone());
+        }
+        if filter_text.is_none() {
+          filter_text = Some(label.clone());
+        }
+        label += "?";
+      }
+      if kind_modifiers.contains("deprecated") {
+        tags = Some(vec![lsp::CompletionItemTag::Deprecated]);
+      }
+      if kind_modifiers.contains("color") {
+        kind = Some(lsp::CompletionItemKind::Color);
+      }
+      if self.kind == ScriptElementKind::ScriptElement {
+        for ext_modifier in FILE_EXTENSION_KIND_MODIFIERS {
+          if kind_modifiers.contains(ext_modifier) {
+            detail = if self.name.to_lowercase().ends_with(ext_modifier) {
+              Some(self.name.clone())
+            } else {
+              Some(format!("{}{}", self.name, ext_modifier))
+            };
+            break;
+          }
+        }
+      }
+    }
+
+    let text_edit =
+      if let (Some(text_span), Some(new_text)) = (range, insert_text) {
+        let range = text_span.to_range(line_index);
+        let insert_replace_edit = lsp::InsertReplaceEdit {
+          new_text,
+          insert: range,
+          replace: range,
+        };
+        Some(insert_replace_edit.into())
+      } else {
+        None
+      };
+
+    let data = CompletionItemData {
+      specifier: specifier.clone(),
+      position,
+      name: self.name.clone(),
+      source: self.source.clone(),
+      data: self.data.clone(),
+      use_code_snippet,
+    };
+
+    lsp::CompletionItem {
+      label,
+      kind,
+      sort_text,
+      preselect,
+      text_edit,
+      filter_text,
+      detail,
+      tags,
+      data: Some(serde_json::to_value(data).unwrap()),
+      ..Default::default()
+    }
   }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompletionEntry {
-  kind: ScriptElementKind,
-  kind_modifiers: Option<String>,
-  name: String,
-  sort_text: String,
-  insert_text: Option<String>,
-  replacement_span: Option<TextSpan>,
-  has_action: Option<bool>,
-  source: Option<String>,
-  is_recommended: Option<bool>,
+pub struct SignatureHelpItems {
+  items: Vec<SignatureHelpItem>,
+  applicable_span: TextSpan,
+  selected_item_index: u32,
+  argument_index: u32,
+  argument_count: u32,
 }
 
-impl CompletionEntry {
-  pub fn into_completion_item(
-    self,
-    line_index: &LineIndex,
-  ) -> lsp_types::CompletionItem {
-    let mut item = lsp_types::CompletionItem {
-      label: self.name,
-      kind: Some(self.kind.into()),
-      sort_text: Some(self.sort_text.clone()),
-      // TODO(lucacasonato): missing commit_characters
-      ..Default::default()
-    };
-
-    if let Some(true) = self.is_recommended {
-      // Make sure isRecommended property always comes first
-      // https://github.com/Microsoft/vscode/issues/40325
-      item.preselect = Some(true);
-    } else if self.source.is_some() {
-      // De-prioritze auto-imports
-      // https://github.com/Microsoft/vscode/issues/40311
-      item.sort_text = Some("\u{ffff}".to_string() + &self.sort_text)
+impl SignatureHelpItems {
+  pub fn into_signature_help(self) -> lsp::SignatureHelp {
+    lsp::SignatureHelp {
+      signatures: self
+        .items
+        .into_iter()
+        .map(|item| item.into_signature_information())
+        .collect(),
+      active_parameter: Some(self.argument_index),
+      active_signature: Some(self.selected_item_index),
     }
+  }
+}
 
-    match item.kind {
-      Some(lsp_types::CompletionItemKind::Function)
-      | Some(lsp_types::CompletionItemKind::Method) => {
-        item.insert_text_format = Some(lsp_types::InsertTextFormat::Snippet);
-      }
-      _ => {}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureHelpItem {
+  is_variadic: bool,
+  prefix_display_parts: Vec<SymbolDisplayPart>,
+  suffix_display_parts: Vec<SymbolDisplayPart>,
+  separator_display_parts: Vec<SymbolDisplayPart>,
+  parameters: Vec<SignatureHelpParameter>,
+  documentation: Vec<SymbolDisplayPart>,
+  tags: Vec<JSDocTagInfo>,
+}
+
+impl SignatureHelpItem {
+  pub fn into_signature_information(self) -> lsp::SignatureInformation {
+    let prefix_text = display_parts_to_string(&self.prefix_display_parts);
+    let params_text = self
+      .parameters
+      .iter()
+      .map(|param| display_parts_to_string(&param.display_parts))
+      .collect::<Vec<String>>()
+      .join(", ");
+    let suffix_text = display_parts_to_string(&self.suffix_display_parts);
+    lsp::SignatureInformation {
+      label: format!("{}{}{}", prefix_text, params_text, suffix_text),
+      documentation: Some(lsp::Documentation::String(display_parts_to_string(
+        &self.documentation,
+      ))),
+      parameters: Some(
+        self
+          .parameters
+          .into_iter()
+          .map(|param| param.into_parameter_information())
+          .collect(),
+      ),
+      active_parameter: None,
     }
+  }
+}
 
-    let mut insert_text = self.insert_text;
-    let replacement_range: Option<lsp_types::Range> =
-      self.replacement_span.map(|span| span.to_range(line_index));
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureHelpParameter {
+  name: String,
+  documentation: Vec<SymbolDisplayPart>,
+  display_parts: Vec<SymbolDisplayPart>,
+  is_optional: bool,
+}
 
-    // TODO(lucacasonato): port other special cases from https://github.com/theia-ide/typescript-language-server/blob/fdf28313833cd6216d00eb4e04dc7f00f4c04f09/server/src/completion.ts#L49-L55
-
-    if let Some(kind_modifiers) = self.kind_modifiers {
-      if kind_modifiers.contains("\\optional\\") {
-        if insert_text.is_none() {
-          insert_text = Some(item.label.clone());
-        }
-        if item.filter_text.is_none() {
-          item.filter_text = Some(item.label.clone());
-        }
-        item.label += "?";
-      }
+impl SignatureHelpParameter {
+  pub fn into_parameter_information(self) -> lsp::ParameterInformation {
+    lsp::ParameterInformation {
+      label: lsp::ParameterLabel::Simple(display_parts_to_string(
+        &self.display_parts,
+      )),
+      documentation: Some(lsp::Documentation::String(display_parts_to_string(
+        &self.documentation,
+      ))),
     }
-
-    if let Some(insert_text) = insert_text {
-      if let Some(replacement_range) = replacement_range {
-        item.text_edit = Some(lsp_types::CompletionTextEdit::Edit(
-          lsp_types::TextEdit::new(replacement_range, insert_text),
-        ));
-      } else {
-        item.insert_text = Some(insert_text);
-      }
-    }
-
-    item
   }
 }
 
@@ -792,7 +1322,7 @@ struct State<'a> {
   last_id: usize,
   response: Option<Response>,
   state_snapshot: StateSnapshot,
-  snapshots: HashMap<(Cow<'a, str>, Cow<'a, str>), String>,
+  snapshots: HashMap<(ModuleSpecifier, Cow<'a, str>), String>,
 }
 
 impl<'a> State<'a> {
@@ -802,7 +1332,7 @@ impl<'a> State<'a> {
       last_id: 1,
       response: None,
       state_snapshot,
-      snapshots: Default::default(),
+      snapshots: HashMap::default(),
     }
   }
 }
@@ -810,25 +1340,38 @@ impl<'a> State<'a> {
 /// If a snapshot is missing from the state cache, add it.
 fn cache_snapshot(
   state: &mut State,
-  specifier: String,
+  specifier: &ModuleSpecifier,
   version: String,
 ) -> Result<(), AnyError> {
   if !state
     .snapshots
-    .contains_key(&(specifier.clone().into(), version.clone().into()))
+    .contains_key(&(specifier.clone(), version.clone().into()))
   {
-    let s = ModuleSpecifier::resolve_url(&specifier)?;
-    let content = state.state_snapshot.documents.content(&s)?.unwrap();
+    let content = if state.state_snapshot.documents.contains_key(specifier) {
+      state
+        .state_snapshot
+        .documents
+        .content(specifier)?
+        .ok_or_else(|| {
+          anyhow!("Specifier unexpectedly doesn't have content: {}", specifier)
+        })?
+    } else {
+      state.state_snapshot.sources.get_source(specifier).ok_or_else(|| {
+        anyhow!("Specifier (\"{}\") is not an in memory document or on disk resource.", specifier)
+      })?
+    };
     state
       .snapshots
-      .insert((specifier.into(), version.into()), content);
+      .insert((specifier.clone(), version.into()), content);
   }
   Ok(())
 }
 
-fn op<F>(op_fn: F) -> Box<OpFn>
+fn op<F, V, R>(op_fn: F) -> Box<OpFn>
 where
-  F: Fn(&mut State, Value) -> Result<Value, AnyError> + 'static,
+  F: Fn(&mut State, V) -> Result<R, AnyError> + 'static,
+  V: de::DeserializeOwned,
+  R: Serialize,
 {
   json_op_sync(move |s, args, _bufs| {
     let state = s.borrow_mut::<State>();
@@ -845,12 +1388,16 @@ struct SourceSnapshotArgs {
 
 /// The language service is dropping a reference to a source file snapshot, and
 /// we can drop our version of that document.
-fn dispose(state: &mut State, args: Value) -> Result<Value, AnyError> {
-  let v: SourceSnapshotArgs = serde_json::from_value(args)?;
-  state
-    .snapshots
-    .remove(&(v.specifier.into(), v.version.into()));
-  Ok(json!(true))
+#[allow(clippy::unnecessary_wraps)]
+fn dispose(
+  state: &mut State,
+  args: SourceSnapshotArgs,
+) -> Result<bool, AnyError> {
+  let mark = state.state_snapshot.performance.mark("op_dispose");
+  let specifier = resolve_url(&args.specifier)?;
+  state.snapshots.remove(&(specifier, args.version.into()));
+  state.state_snapshot.performance.measure(mark);
+  Ok(true)
 }
 
 #[derive(Debug, Deserialize)]
@@ -863,20 +1410,27 @@ struct GetChangeRangeArgs {
 }
 
 /// The language service wants to compare an old snapshot with a new snapshot to
-/// determine what source hash changed.
-fn get_change_range(state: &mut State, args: Value) -> Result<Value, AnyError> {
-  let v: GetChangeRangeArgs = serde_json::from_value(args.clone())?;
-  cache_snapshot(state, v.specifier.clone(), v.version.clone())?;
+/// determine what source has changed.
+fn get_change_range(
+  state: &mut State,
+  args: GetChangeRangeArgs,
+) -> Result<Value, AnyError> {
+  let mark = state.state_snapshot.performance.mark("op_get_change_range");
+  let specifier = resolve_url(&args.specifier)?;
+  cache_snapshot(state, &specifier, args.version.clone())?;
   if let Some(current) = state
     .snapshots
-    .get(&(v.specifier.clone().into(), v.version.into()))
+    .get(&(specifier.clone(), args.version.clone().into()))
   {
     if let Some(prev) = state
       .snapshots
-      .get(&(v.specifier.clone().into(), v.old_version.clone().into()))
+      .get(&(specifier, args.old_version.clone().into()))
     {
+      state.state_snapshot.performance.measure(mark);
       Ok(text::get_range_change(prev, current))
     } else {
+      let new_length = current.encode_utf16().count();
+      state.state_snapshot.performance.measure(mark);
       // when a local file is opened up in the editor, the compiler might
       // already have a snapshot of it in memory, and will request it, but we
       // now are working off in memory versions of the document, and so need
@@ -884,35 +1438,39 @@ fn get_change_range(state: &mut State, args: Value) -> Result<Value, AnyError> {
       Ok(json!({
         "span": {
           "start": 0,
-          "length": v.old_length,
+          "length": args.old_length,
         },
-        "newLength": current.encode_utf16().count(),
+        "newLength": new_length,
       }))
     }
   } else {
+    state.state_snapshot.performance.measure(mark);
     Err(custom_error(
       "MissingSnapshot",
       format!(
-        "The current snapshot version is missing.\n  Args: \"{}\"",
+        "The current snapshot version is missing.\n  Args: \"{:?}\"",
         args
       ),
     ))
   }
 }
 
-fn get_length(state: &mut State, args: Value) -> Result<Value, AnyError> {
-  let v: SourceSnapshotArgs = serde_json::from_value(args)?;
-  let specifier = ModuleSpecifier::resolve_url(&v.specifier)?;
-  if state.state_snapshot.documents.contains(&specifier) {
-    cache_snapshot(state, v.specifier.clone(), v.version.clone())?;
+fn get_length(
+  state: &mut State,
+  args: SourceSnapshotArgs,
+) -> Result<usize, AnyError> {
+  let mark = state.state_snapshot.performance.mark("op_get_length");
+  let specifier = resolve_url(&args.specifier)?;
+  if let Some(Some(asset)) = state.state_snapshot.assets.get(&specifier) {
+    Ok(asset.length)
+  } else {
+    cache_snapshot(state, &specifier, args.version.clone())?;
     let content = state
       .snapshots
-      .get(&(v.specifier.into(), v.version.into()))
+      .get(&(specifier, args.version.into()))
       .unwrap();
-    Ok(json!(content.encode_utf16().count()))
-  } else {
-    let sources = &state.state_snapshot.sources;
-    Ok(json!(sources.get_length_utf16(&specifier).unwrap()))
+    state.state_snapshot.performance.measure(mark);
+    Ok(content.encode_utf16().count())
   }
 }
 
@@ -925,38 +1483,42 @@ struct GetTextArgs {
   end: usize,
 }
 
-fn get_text(state: &mut State, args: Value) -> Result<Value, AnyError> {
-  let v: GetTextArgs = serde_json::from_value(args)?;
-  let specifier = ModuleSpecifier::resolve_url(&v.specifier)?;
-  let content = if state.state_snapshot.documents.contains(&specifier) {
-    cache_snapshot(state, v.specifier.clone(), v.version.clone())?;
-    state
-      .snapshots
-      .get(&(v.specifier.into(), v.version.into()))
-      .unwrap()
-      .clone()
-  } else {
-    let sources = &state.state_snapshot.sources;
-    sources.get_text(&specifier).unwrap()
-  };
-  Ok(json!(text::slice(&content, v.start..v.end)))
+fn get_text(state: &mut State, args: GetTextArgs) -> Result<String, AnyError> {
+  let mark = state.state_snapshot.performance.mark("op_get_text");
+  let specifier = resolve_url(&args.specifier)?;
+  let content =
+    if let Some(Some(content)) = state.state_snapshot.assets.get(&specifier) {
+      content.text.clone()
+    } else {
+      cache_snapshot(state, &specifier, args.version.clone())?;
+      state
+        .snapshots
+        .get(&(specifier, args.version.into()))
+        .unwrap()
+        .clone()
+    };
+  state.state_snapshot.performance.measure(mark);
+  Ok(text::slice(&content, args.start..args.end).to_string())
 }
 
-fn resolve(state: &mut State, args: Value) -> Result<Value, AnyError> {
-  let v: ResolveArgs = serde_json::from_value(args)?;
-  let mut resolved = Vec::<Option<(String, String)>>::new();
-  let referrer = ModuleSpecifier::resolve_url(&v.base)?;
-  let sources = &state.state_snapshot.sources;
+fn resolve(
+  state: &mut State,
+  args: ResolveArgs,
+) -> Result<Vec<Option<(String, String)>>, AnyError> {
+  let mark = state.state_snapshot.performance.mark("op_resolve");
+  let mut resolved = Vec::new();
+  let referrer = resolve_url(&args.base)?;
+  let sources = &mut state.state_snapshot.sources;
 
-  if state.state_snapshot.documents.contains(&referrer) {
+  if state.state_snapshot.documents.contains_key(&referrer) {
     if let Some(dependencies) =
       state.state_snapshot.documents.dependencies(&referrer)
     {
-      for specifier in &v.specifiers {
+      for specifier in &args.specifiers {
         if specifier.starts_with("asset:///") {
           resolved.push(Some((
             specifier.clone(),
-            MediaType::from(specifier).as_ts_extension(),
+            MediaType::from(specifier).as_ts_extension().into(),
           )))
         } else if let Some(dependency) = dependencies.get(specifier) {
           let resolved_import =
@@ -965,14 +1527,22 @@ fn resolve(state: &mut State, args: Value) -> Result<Value, AnyError> {
             } else if let Some(resolved_import) = &dependency.maybe_code {
               resolved_import.clone()
             } else {
-              ResolvedDependency::Err("missing dependency".to_string())
+              ResolvedDependency::Err(ResolvedDependencyErr::Missing)
             };
           if let ResolvedDependency::Resolved(resolved_specifier) =
             resolved_import
           {
-            if state.state_snapshot.documents.contains(&resolved_specifier)
-              || sources.contains(&resolved_specifier)
+            if state
+              .state_snapshot
+              .documents
+              .contains_key(&resolved_specifier)
             {
+              let media_type = MediaType::from(&resolved_specifier);
+              resolved.push(Some((
+                resolved_specifier.to_string(),
+                media_type.as_ts_extension().into(),
+              )));
+            } else if sources.contains_key(&resolved_specifier) {
               let media_type = if let Some(media_type) =
                 sources.get_media_type(&resolved_specifier)
               {
@@ -982,7 +1552,7 @@ fn resolve(state: &mut State, args: Value) -> Result<Value, AnyError> {
               };
               resolved.push(Some((
                 resolved_specifier.to_string(),
-                media_type.as_ts_extension(),
+                media_type.as_ts_extension().into(),
               )));
             } else {
               resolved.push(None);
@@ -993,20 +1563,21 @@ fn resolve(state: &mut State, args: Value) -> Result<Value, AnyError> {
         }
       }
     }
-  } else if sources.contains(&referrer) {
-    for specifier in &v.specifiers {
+  } else if sources.contains_key(&referrer) {
+    for specifier in &args.specifiers {
       if let Some((resolved_specifier, media_type)) =
         sources.resolve_import(specifier, &referrer)
       {
         resolved.push(Some((
           resolved_specifier.to_string(),
-          media_type.as_ts_extension(),
+          media_type.as_ts_extension().into(),
         )));
       } else {
         resolved.push(None);
       }
     }
   } else {
+    state.state_snapshot.performance.measure(mark);
     return Err(custom_error(
       "NotFound",
       format!(
@@ -1016,16 +1587,30 @@ fn resolve(state: &mut State, args: Value) -> Result<Value, AnyError> {
     ));
   }
 
-  Ok(json!(resolved))
+  state.state_snapshot.performance.measure(mark);
+  Ok(resolved)
 }
 
-fn respond(state: &mut State, args: Value) -> Result<Value, AnyError> {
-  state.response = Some(serde_json::from_value(args)?);
-  Ok(json!(true))
+#[allow(clippy::unnecessary_wraps)]
+fn respond(state: &mut State, args: Response) -> Result<bool, AnyError> {
+  state.response = Some(args);
+  Ok(true)
 }
 
-fn script_names(state: &mut State, _args: Value) -> Result<Value, AnyError> {
-  Ok(json!(state.state_snapshot.documents.open_specifiers()))
+#[allow(clippy::unnecessary_wraps)]
+fn script_names(
+  state: &mut State,
+  _args: Value,
+) -> Result<Vec<ModuleSpecifier>, AnyError> {
+  Ok(
+    state
+      .state_snapshot
+      .documents
+      .open_specifiers()
+      .into_iter()
+      .cloned()
+      .collect(),
+  )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1034,19 +1619,31 @@ struct ScriptVersionArgs {
   specifier: String,
 }
 
-fn script_version(state: &mut State, args: Value) -> Result<Value, AnyError> {
-  let v: ScriptVersionArgs = serde_json::from_value(args)?;
-  let specifier = ModuleSpecifier::resolve_url(&v.specifier)?;
-  if let Some(version) = state.state_snapshot.documents.version(&specifier) {
-    return Ok(json!(version.to_string()));
+fn script_version(
+  state: &mut State,
+  args: ScriptVersionArgs,
+) -> Result<Option<String>, AnyError> {
+  let mark = state.state_snapshot.performance.mark("op_script_version");
+  let specifier = resolve_url(&args.specifier)?;
+  if specifier.scheme() == "asset" {
+    return if state.state_snapshot.assets.contains_key(&specifier) {
+      Ok(Some("1".to_string()))
+    } else {
+      Ok(None)
+    };
+  } else if let Some(version) =
+    state.state_snapshot.documents.version(&specifier)
+  {
+    return Ok(Some(version.to_string()));
   } else {
-    let sources = &state.state_snapshot.sources;
+    let sources = &mut state.state_snapshot.sources;
     if let Some(version) = sources.get_script_version(&specifier) {
-      return Ok(json!(version));
+      return Ok(Some(version));
     }
   }
 
-  Ok(json!(None::<String>))
+  state.state_snapshot.performance.measure(mark);
+  Ok(None)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1055,10 +1652,10 @@ struct SetAssetArgs {
   text: Option<String>,
 }
 
-fn set_asset(state: &mut State, args: Value) -> Result<Value, AnyError> {
-  let v: SetAssetArgs = serde_json::from_value(args)?;
-  state.asset = v.text;
-  Ok(json!(true))
+#[allow(clippy::unnecessary_wraps)]
+fn set_asset(state: &mut State, args: SetAssetArgs) -> Result<bool, AnyError> {
+  state.asset = args.text;
+  Ok(true)
 }
 
 /// Create and setup a JsRuntime based on a snapshot. It is expected that the
@@ -1132,6 +1729,15 @@ pub enum IncludePackageJsonAutoImports {
 
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GetCompletionsAtPositionOptions {
+  #[serde(flatten)]
+  pub user_preferences: UserPreferences,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub trigger_character: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UserPreferences {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub disable_suggestions: Option<bool>,
@@ -1158,29 +1764,100 @@ pub struct UserPreferences {
   pub provide_refactor_not_applicable_reason: Option<bool>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureHelpItemsOptions {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub trigger_reason: Option<SignatureHelpTriggerReason>,
+}
+
+#[derive(Debug, Serialize)]
+pub enum SignatureHelpTriggerKind {
+  #[serde(rename = "characterTyped")]
+  CharacterTyped,
+  #[serde(rename = "invoked")]
+  Invoked,
+  #[serde(rename = "retrigger")]
+  Retrigger,
+}
+
+impl From<lsp::SignatureHelpTriggerKind> for SignatureHelpTriggerKind {
+  fn from(kind: lsp::SignatureHelpTriggerKind) -> Self {
+    match kind {
+      lsp::SignatureHelpTriggerKind::Invoked => Self::Invoked,
+      lsp::SignatureHelpTriggerKind::TriggerCharacter => Self::CharacterTyped,
+      lsp::SignatureHelpTriggerKind::ContentChange => Self::Retrigger,
+    }
+  }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureHelpTriggerReason {
+  pub kind: SignatureHelpTriggerKind,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub trigger_character: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetCompletionDetailsArgs {
+  pub specifier: ModuleSpecifier,
+  pub position: u32,
+  pub name: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub data: Option<Value>,
+}
+
+impl From<CompletionItemData> for GetCompletionDetailsArgs {
+  fn from(item_data: CompletionItemData) -> Self {
+    Self {
+      specifier: item_data.specifier,
+      position: item_data.position,
+      name: item_data.name,
+      source: item_data.source,
+      data: item_data.data,
+    }
+  }
+}
+
 /// Methods that are supported by the Language Service in the compiler isolate.
 #[derive(Debug)]
 pub enum RequestMethod {
   /// Configure the compilation settings for the server.
   Configure(TsConfig),
-  /// Retrieve the text of an assets that exists in memory in the isolate.
-  GetAsset(ModuleSpecifier),
-  /// Return diagnostics for given file.
-  GetDiagnostics(Vec<ModuleSpecifier>),
-  /// Return quick info at position (hover information).
-  GetQuickInfo((ModuleSpecifier, u32)),
-  /// Return document highlights at position.
-  GetDocumentHighlights((ModuleSpecifier, u32, Vec<ModuleSpecifier>)),
-  /// Get document references for a specific position.
-  GetReferences((ModuleSpecifier, u32)),
-  /// Get declaration information for a specific position.
-  GetDefinition((ModuleSpecifier, u32)),
-  /// Get completion information at a given position (IntelliSense).
-  GetCompletions((ModuleSpecifier, u32, UserPreferences)),
-  /// Get implementation information for a specific position.
-  GetImplementation((ModuleSpecifier, u32)),
   /// Get rename locations at a given position.
   FindRenameLocations((ModuleSpecifier, u32, bool, bool, bool)),
+  /// Retrieve the text of an assets that exists in memory in the isolate.
+  GetAsset(ModuleSpecifier),
+  /// Retrieve code fixes for a range of a file with the provided error codes.
+  GetCodeFixes((ModuleSpecifier, u32, u32, Vec<String>)),
+  /// Get completion information at a given position (IntelliSense).
+  GetCompletions((ModuleSpecifier, u32, GetCompletionsAtPositionOptions)),
+  /// Get details about a specific completion entry.
+  GetCompletionDetails(GetCompletionDetailsArgs),
+  /// Retrieve the combined code fixes for a fix id for a module.
+  GetCombinedCodeFix((ModuleSpecifier, Value)),
+  /// Get declaration information for a specific position.
+  GetDefinition((ModuleSpecifier, u32)),
+  /// Return diagnostics for given file.
+  GetDiagnostics(Vec<ModuleSpecifier>),
+  /// Return document highlights at position.
+  GetDocumentHighlights((ModuleSpecifier, u32, Vec<ModuleSpecifier>)),
+  /// Get implementation information for a specific position.
+  GetImplementation((ModuleSpecifier, u32)),
+  /// Get a "navigation tree" for a specifier.
+  GetNavigationTree(ModuleSpecifier),
+  /// Return quick info at position (hover information).
+  GetQuickInfo((ModuleSpecifier, u32)),
+  /// Get document references for a specific position.
+  GetReferences((ModuleSpecifier, u32)),
+  /// Get signature help items for a specific position.
+  GetSignatureHelpItems((ModuleSpecifier, u32, SignatureHelpItemsOptions)),
+  /// Get the diagnostic codes that support some form of code fix.
+  GetSupportedCodeFixes,
 }
 
 impl RequestMethod {
@@ -1190,60 +1867,6 @@ impl RequestMethod {
         "id": id,
         "method": "configure",
         "compilerOptions": config,
-      }),
-      RequestMethod::GetAsset(specifier) => json!({
-        "id": id,
-        "method": "getAsset",
-        "specifier": specifier,
-      }),
-      RequestMethod::GetDiagnostics(specifiers) => json!({
-        "id": id,
-        "method": "getDiagnostics",
-        "specifiers": specifiers,
-      }),
-      RequestMethod::GetQuickInfo((specifier, position)) => json!({
-        "id": id,
-        "method": "getQuickInfo",
-        "specifier": specifier,
-        "position": position,
-      }),
-      RequestMethod::GetDocumentHighlights((
-        specifier,
-        position,
-        files_to_search,
-      )) => json!({
-        "id": id,
-        "method": "getDocumentHighlights",
-        "specifier": specifier,
-        "position": position,
-        "filesToSearch": files_to_search,
-      }),
-      RequestMethod::GetReferences((specifier, position)) => json!({
-        "id": id,
-        "method": "getReferences",
-        "specifier": specifier,
-        "position": position,
-      }),
-      RequestMethod::GetDefinition((specifier, position)) => json!({
-        "id": id,
-        "method": "getDefinition",
-        "specifier": specifier,
-        "position": position,
-      }),
-      RequestMethod::GetCompletions((specifier, position, preferences)) => {
-        json!({
-          "id": id,
-          "method": "getCompletions",
-          "specifier": specifier,
-          "position": position,
-          "preferences": preferences,
-        })
-      }
-      RequestMethod::GetImplementation((specifier, position)) => json!({
-          "id": id,
-          "method": "getImplementation",
-          "specifier": specifier,
-          "position": position,
       }),
       RequestMethod::FindRenameLocations((
         specifier,
@@ -1262,6 +1885,102 @@ impl RequestMethod {
           "providePrefixAndSuffixTextForRename": provide_prefix_and_suffix_text_for_rename
         })
       }
+      RequestMethod::GetAsset(specifier) => json!({
+        "id": id,
+        "method": "getAsset",
+        "specifier": specifier,
+      }),
+      RequestMethod::GetCodeFixes((
+        specifier,
+        start_pos,
+        end_pos,
+        error_codes,
+      )) => json!({
+        "id": id,
+        "method": "getCodeFixes",
+        "specifier": specifier,
+        "startPosition": start_pos,
+        "endPosition": end_pos,
+        "errorCodes": error_codes,
+      }),
+      RequestMethod::GetCombinedCodeFix((specifier, fix_id)) => json!({
+        "id": id,
+        "method": "getCombinedCodeFix",
+        "specifier": specifier,
+        "fixId": fix_id,
+      }),
+      RequestMethod::GetCompletionDetails(args) => json!({
+        "id": id,
+        "method": "getCompletionDetails",
+        "args": args
+      }),
+      RequestMethod::GetCompletions((specifier, position, preferences)) => {
+        json!({
+          "id": id,
+          "method": "getCompletions",
+          "specifier": specifier,
+          "position": position,
+          "preferences": preferences,
+        })
+      }
+      RequestMethod::GetDefinition((specifier, position)) => json!({
+        "id": id,
+        "method": "getDefinition",
+        "specifier": specifier,
+        "position": position,
+      }),
+      RequestMethod::GetDiagnostics(specifiers) => json!({
+        "id": id,
+        "method": "getDiagnostics",
+        "specifiers": specifiers,
+      }),
+      RequestMethod::GetDocumentHighlights((
+        specifier,
+        position,
+        files_to_search,
+      )) => json!({
+        "id": id,
+        "method": "getDocumentHighlights",
+        "specifier": specifier,
+        "position": position,
+        "filesToSearch": files_to_search,
+      }),
+      RequestMethod::GetImplementation((specifier, position)) => json!({
+        "id": id,
+        "method": "getImplementation",
+        "specifier": specifier,
+        "position": position,
+      }),
+      RequestMethod::GetNavigationTree(specifier) => json!({
+        "id": id,
+        "method": "getNavigationTree",
+        "specifier": specifier,
+      }),
+      RequestMethod::GetQuickInfo((specifier, position)) => json!({
+        "id": id,
+        "method": "getQuickInfo",
+        "specifier": specifier,
+        "position": position,
+      }),
+      RequestMethod::GetReferences((specifier, position)) => json!({
+        "id": id,
+        "method": "getReferences",
+        "specifier": specifier,
+        "position": position,
+      }),
+      RequestMethod::GetSignatureHelpItems((specifier, position, options)) => {
+        json!({
+          "id": id,
+          "method": "getSignatureHelpItems",
+          "specifier": specifier,
+          "position": position,
+          "options": options,
+        })
+      }
+      RequestMethod::GetSupportedCodeFixes => json!({
+        "id": id,
+        "method": "getSupportedCodeFixes",
+      }),
     }
   }
 }
@@ -1302,28 +2021,50 @@ pub fn request(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::http_cache::HttpCache;
+  use crate::http_util::HeadersMap;
+  use crate::lsp::analysis;
   use crate::lsp::documents::DocumentCache;
+  use crate::lsp::sources::Sources;
+  use crate::lsp::text::LineIndex;
+  use std::path::Path;
+  use std::path::PathBuf;
+  use tempfile::TempDir;
 
-  fn mock_state_snapshot(sources: Vec<(&str, &str, i32)>) -> StateSnapshot {
+  fn mock_state_snapshot(
+    fixtures: &[(&str, &str, i32)],
+    location: &Path,
+  ) -> StateSnapshot {
     let mut documents = DocumentCache::default();
-    for (specifier, content, version) in sources {
-      let specifier = ModuleSpecifier::resolve_url(specifier)
-        .expect("failed to create specifier");
-      documents.open(specifier, version, content.to_string());
+    for (specifier, source, version) in fixtures {
+      let specifier =
+        resolve_url(specifier).expect("failed to create specifier");
+      documents.open(specifier.clone(), *version, source);
+      if let Some((deps, _)) = analysis::analyze_dependencies(
+        &specifier,
+        source,
+        &MediaType::from(&specifier),
+        &None,
+      ) {
+        documents.set_dependencies(&specifier, Some(deps)).unwrap();
+      }
     }
+    let sources = Sources::new(location);
     StateSnapshot {
-      assets: Default::default(),
       documents,
-      sources: Default::default(),
+      sources,
+      ..Default::default()
     }
   }
 
   fn setup(
     debug: bool,
     config: Value,
-    sources: Vec<(&str, &str, i32)>,
-  ) -> (JsRuntime, StateSnapshot) {
-    let state_snapshot = mock_state_snapshot(sources.clone());
+    sources: &[(&str, &str, i32)],
+  ) -> (JsRuntime, StateSnapshot, PathBuf) {
+    let temp_dir = TempDir::new().expect("could not create temp dir");
+    let location = temp_dir.path().join("deps");
+    let state_snapshot = mock_state_snapshot(sources, &location);
     let mut runtime = start(debug).expect("could not start server");
     let ts_config = TsConfig::new(config);
     assert_eq!(
@@ -1335,7 +2076,7 @@ mod tests {
       .expect("failed request"),
       json!(true)
     );
-    (runtime, state_snapshot)
+    (runtime, state_snapshot, location)
   }
 
   #[test]
@@ -1362,20 +2103,20 @@ mod tests {
         "module": "esnext",
         "noEmit": true,
       }),
-      vec![],
+      &[],
     );
   }
 
   #[test]
   fn test_project_reconfigure() {
-    let (mut runtime, state_snapshot) = setup(
+    let (mut runtime, state_snapshot, _) = setup(
       false,
       json!({
         "target": "esnext",
         "module": "esnext",
         "noEmit": true,
       }),
-      vec![],
+      &[],
     );
     let ts_config = TsConfig::new(json!({
       "target": "esnext",
@@ -1395,17 +2136,16 @@ mod tests {
 
   #[test]
   fn test_get_diagnostics() {
-    let (mut runtime, state_snapshot) = setup(
+    let (mut runtime, state_snapshot, _) = setup(
       false,
       json!({
         "target": "esnext",
         "module": "esnext",
         "noEmit": true,
       }),
-      vec![("file:///a.ts", r#"console.log("hello deno");"#, 1)],
+      &[("file:///a.ts", r#"console.log("hello deno");"#, 1)],
     );
-    let specifier = ModuleSpecifier::resolve_url("file:///a.ts")
-      .expect("could not resolve url");
+    let specifier = resolve_url("file:///a.ts").expect("could not resolve url");
     let result = request(
       &mut runtime,
       state_snapshot,
@@ -1438,8 +2178,32 @@ mod tests {
   }
 
   #[test]
+  fn test_get_diagnostics_lib() {
+    let (mut runtime, state_snapshot, _) = setup(
+      false,
+      json!({
+        "target": "esnext",
+        "module": "esnext",
+        "jsx": "react",
+        "lib": ["esnext", "dom", "deno.ns"],
+        "noEmit": true,
+      }),
+      &[("file:///a.ts", r#"console.log(document.location);"#, 1)],
+    );
+    let specifier = resolve_url("file:///a.ts").expect("could not resolve url");
+    let result = request(
+      &mut runtime,
+      state_snapshot,
+      RequestMethod::GetDiagnostics(vec![specifier]),
+    );
+    assert!(result.is_ok());
+    let response = result.unwrap();
+    assert_eq!(response, json!({ "file:///a.ts": [] }));
+  }
+
+  #[test]
   fn test_module_resolution() {
-    let (mut runtime, state_snapshot) = setup(
+    let (mut runtime, state_snapshot, _) = setup(
       false,
       json!({
         "target": "esnext",
@@ -1447,7 +2211,7 @@ mod tests {
         "lib": ["deno.ns", "deno.window"],
         "noEmit": true,
       }),
-      vec![(
+      &[(
         "file:///a.ts",
         r#"
         import { B } from "https://deno.land/x/b/mod.ts";
@@ -1459,8 +2223,7 @@ mod tests {
         1,
       )],
     );
-    let specifier = ModuleSpecifier::resolve_url("file:///a.ts")
-      .expect("could not resolve url");
+    let specifier = resolve_url("file:///a.ts").expect("could not resolve url");
     let result = request(
       &mut runtime,
       state_snapshot,
@@ -1473,7 +2236,7 @@ mod tests {
 
   #[test]
   fn test_bad_module_specifiers() {
-    let (mut runtime, state_snapshot) = setup(
+    let (mut runtime, state_snapshot, _) = setup(
       false,
       json!({
         "target": "esnext",
@@ -1481,7 +2244,7 @@ mod tests {
         "lib": ["deno.ns", "deno.window"],
         "noEmit": true,
       }),
-      vec![(
+      &[(
         "file:///a.ts",
         r#"
         import { A } from ".";
@@ -1489,8 +2252,7 @@ mod tests {
         1,
       )],
     );
-    let specifier = ModuleSpecifier::resolve_url("file:///a.ts")
-      .expect("could not resolve url");
+    let specifier = resolve_url("file:///a.ts").expect("could not resolve url");
     let result = request(
       &mut runtime,
       state_snapshot,
@@ -1523,7 +2285,7 @@ mod tests {
 
   #[test]
   fn test_remote_modules() {
-    let (mut runtime, state_snapshot) = setup(
+    let (mut runtime, state_snapshot, _) = setup(
       false,
       json!({
         "target": "esnext",
@@ -1531,7 +2293,7 @@ mod tests {
         "lib": ["deno.ns", "deno.window"],
         "noEmit": true,
       }),
-      vec![(
+      &[(
         "file:///a.ts",
         r#"
         import { B } from "https://deno.land/x/b/mod.ts";
@@ -1543,8 +2305,7 @@ mod tests {
         1,
       )],
     );
-    let specifier = ModuleSpecifier::resolve_url("file:///a.ts")
-      .expect("could not resolve url");
+    let specifier = resolve_url("file:///a.ts").expect("could not resolve url");
     let result = request(
       &mut runtime,
       state_snapshot,
@@ -1557,7 +2318,7 @@ mod tests {
 
   #[test]
   fn test_partial_modules() {
-    let (mut runtime, state_snapshot) = setup(
+    let (mut runtime, state_snapshot, _) = setup(
       false,
       json!({
         "target": "esnext",
@@ -1565,7 +2326,7 @@ mod tests {
         "lib": ["deno.ns", "deno.window"],
         "noEmit": true,
       }),
-      vec![(
+      &[(
         "file:///a.ts",
         r#"
         import {
@@ -1574,14 +2335,13 @@ mod tests {
           Router,
           Status,
         } from "https://deno.land/x/oak@v6.3.2/mod.ts";
-        
+
         import * as test from
       "#,
         1,
       )],
     );
-    let specifier = ModuleSpecifier::resolve_url("file:///a.ts")
-      .expect("could not resolve url");
+    let specifier = resolve_url("file:///a.ts").expect("could not resolve url");
     let result = request(
       &mut runtime,
       state_snapshot,
@@ -1628,7 +2388,7 @@ mod tests {
 
   #[test]
   fn test_no_debug_failure() {
-    let (mut runtime, state_snapshot) = setup(
+    let (mut runtime, state_snapshot, _) = setup(
       false,
       json!({
         "target": "esnext",
@@ -1636,10 +2396,9 @@ mod tests {
         "lib": ["deno.ns", "deno.window"],
         "noEmit": true,
       }),
-      vec![("file:///a.ts", r#"const url = new URL("b.js", import."#, 1)],
+      &[("file:///a.ts", r#"const url = new URL("b.js", import."#, 1)],
     );
-    let specifier = ModuleSpecifier::resolve_url("file:///a.ts")
-      .expect("could not resolve url");
+    let specifier = resolve_url("file:///a.ts").expect("could not resolve url");
     let result = request(
       &mut runtime,
       state_snapshot,
@@ -1652,7 +2411,7 @@ mod tests {
 
   #[test]
   fn test_request_asset() {
-    let (mut runtime, state_snapshot) = setup(
+    let (mut runtime, state_snapshot, _) = setup(
       false,
       json!({
         "target": "esnext",
@@ -1660,10 +2419,10 @@ mod tests {
         "lib": ["deno.ns", "deno.window"],
         "noEmit": true,
       }),
-      vec![],
+      &[],
     );
-    let specifier = ModuleSpecifier::resolve_url("asset:///lib.esnext.d.ts")
-      .expect("could not resolve url");
+    let specifier =
+      resolve_url("asset:///lib.esnext.d.ts").expect("could not resolve url");
     let result = request(
       &mut runtime,
       state_snapshot,
@@ -1673,5 +2432,255 @@ mod tests {
     let response: Option<String> =
       serde_json::from_value(result.unwrap()).unwrap();
     assert!(response.is_some());
+  }
+
+  #[test]
+  fn test_modify_sources() {
+    let (mut runtime, state_snapshot, location) = setup(
+      true,
+      json!({
+        "target": "esnext",
+        "module": "esnext",
+        "lib": ["deno.ns", "deno.window"],
+        "noEmit": true,
+      }),
+      &[(
+        "file:///a.ts",
+        r#"
+          import * as a from "https://deno.land/x/example/a.ts";
+          if (a.a === "b") {
+            console.log("fail");
+          }
+        "#,
+        1,
+      )],
+    );
+    let cache = HttpCache::new(&location);
+    let specifier_dep =
+      resolve_url("https://deno.land/x/example/a.ts").unwrap();
+    cache
+      .set(
+        &specifier_dep,
+        HeadersMap::default(),
+        b"export const b = \"b\";\n",
+      )
+      .unwrap();
+    let specifier = resolve_url("file:///a.ts").unwrap();
+    let result = request(
+      &mut runtime,
+      state_snapshot.clone(),
+      RequestMethod::GetDiagnostics(vec![specifier]),
+    );
+    assert!(result.is_ok());
+    let response = result.unwrap();
+    assert_eq!(
+      response,
+      json!({
+        "file:///a.ts": [
+          {
+            "start": {
+              "line": 2,
+              "character": 16,
+            },
+            "end": {
+              "line": 2,
+              "character": 17
+            },
+            "fileName": "file:///a.ts",
+            "messageText": "Property \'a\' does not exist on type \'typeof import(\"https://deno.land/x/example/a\")\'.",
+            "sourceLine": "          if (a.a === \"b\") {",
+            "code": 2339,
+            "category": 1,
+          }
+        ]
+      })
+    );
+    cache
+      .set(
+        &specifier_dep,
+        HeadersMap::default(),
+        b"export const b = \"b\";\n\nexport const a = \"b\";\n",
+      )
+      .unwrap();
+    let specifier = resolve_url("file:///a.ts").unwrap();
+    let result = request(
+      &mut runtime,
+      state_snapshot,
+      RequestMethod::GetDiagnostics(vec![specifier]),
+    );
+    assert!(result.is_ok());
+    let response = result.unwrap();
+    assert_eq!(
+      response,
+      json!({
+        "file:///a.ts": []
+      })
+    );
+  }
+
+  #[test]
+  fn test_completion_entry_filter_text() {
+    let fixture = CompletionEntry {
+      kind: ScriptElementKind::MemberVariableElement,
+      name: "['foo']".to_string(),
+      insert_text: Some("['foo']".to_string()),
+      ..Default::default()
+    };
+    let actual = fixture.get_filter_text();
+    assert_eq!(actual, Some(".foo".to_string()));
+  }
+
+  #[test]
+  fn test_completions() {
+    let fixture = r#"
+      import { B } from "https://deno.land/x/b/mod.ts";
+
+      const b = new B();
+
+      console.
+    "#;
+    let line_index = LineIndex::new(fixture);
+    let position = line_index
+      .offset_tsc(lsp::Position {
+        line: 5,
+        character: 16,
+      })
+      .unwrap();
+    let (mut runtime, state_snapshot, _) = setup(
+      false,
+      json!({
+        "target": "esnext",
+        "module": "esnext",
+        "lib": ["deno.ns", "deno.window"],
+        "noEmit": true,
+      }),
+      &[("file:///a.ts", fixture, 1)],
+    );
+    let specifier = resolve_url("file:///a.ts").expect("could not resolve url");
+    let result = request(
+      &mut runtime,
+      state_snapshot.clone(),
+      RequestMethod::GetDiagnostics(vec![specifier.clone()]),
+    );
+    assert!(result.is_ok());
+    let result = request(
+      &mut runtime,
+      state_snapshot.clone(),
+      RequestMethod::GetCompletions((
+        specifier.clone(),
+        position,
+        GetCompletionsAtPositionOptions {
+          user_preferences: UserPreferences {
+            include_completions_with_insert_text: Some(true),
+            ..Default::default()
+          },
+          trigger_character: Some(".".to_string()),
+        },
+      )),
+    );
+    assert!(result.is_ok());
+    let response: CompletionInfo =
+      serde_json::from_value(result.unwrap()).unwrap();
+    assert_eq!(response.entries.len(), 20);
+    let result = request(
+      &mut runtime,
+      state_snapshot,
+      RequestMethod::GetCompletionDetails(GetCompletionDetailsArgs {
+        specifier,
+        position,
+        name: "log".to_string(),
+        source: None,
+        data: None,
+      }),
+    );
+    assert!(result.is_ok());
+    let response = result.unwrap();
+    assert_eq!(
+      response,
+      json!({
+        "name": "log",
+        "kindModifiers": "declare",
+        "kind": "method",
+        "displayParts": [
+          {
+            "text": "(",
+            "kind": "punctuation"
+          },
+          {
+            "text": "method",
+            "kind": "text"
+          },
+          {
+            "text": ")",
+            "kind": "punctuation"
+          },
+          {
+            "text": " ",
+            "kind": "space"
+          },
+          {
+            "text": "Console",
+            "kind": "interfaceName"
+          },
+          {
+            "text": ".",
+            "kind": "punctuation"
+          },
+          {
+            "text": "log",
+            "kind": "methodName"
+          },
+          {
+            "text": "(",
+            "kind": "punctuation"
+          },
+          {
+            "text": "...",
+            "kind": "punctuation"
+          },
+          {
+            "text": "data",
+            "kind": "parameterName"
+          },
+          {
+            "text": ":",
+            "kind": "punctuation"
+          },
+          {
+            "text": " ",
+            "kind": "space"
+          },
+          {
+            "text": "any",
+            "kind": "keyword"
+          },
+          {
+            "text": "[",
+            "kind": "punctuation"
+          },
+          {
+            "text": "]",
+            "kind": "punctuation"
+          },
+          {
+            "text": ")",
+            "kind": "punctuation"
+          },
+          {
+            "text": ":",
+            "kind": "punctuation"
+          },
+          {
+            "text": " ",
+            "kind": "space"
+          },
+          {
+            "text": "void",
+            "kind": "keyword"
+          }
+        ],
+        "documentation": []
+      })
+    );
   }
 }

@@ -1,6 +1,6 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
-use crate::ops::io::StreamResource;
+use crate::ops::io::UnixStreamResource;
 use crate::ops::net::AcceptArgs;
 use crate::ops::net::ReceiveArgs;
 use deno_core::error::bad_resource;
@@ -65,7 +65,7 @@ pub(crate) async fn accept_unix(
   args: AcceptArgs,
   _bufs: BufVec,
 ) -> Result<Value, AnyError> {
-  let rid = args.rid as u32;
+  let rid = args.rid;
 
   let resource = state
     .borrow()
@@ -81,7 +81,7 @@ pub(crate) async fn accept_unix(
 
   let local_addr = unix_stream.local_addr()?;
   let remote_addr = unix_stream.peer_addr()?;
-  let resource = StreamResource::unix_stream(unix_stream);
+  let resource = UnixStreamResource::new(unix_stream.into_split());
   let mut state = state.borrow_mut();
   let rid = state.resource_table.add(resource);
   Ok(json!({
@@ -104,7 +104,7 @@ pub(crate) async fn receive_unix_packet(
 ) -> Result<Value, AnyError> {
   assert_eq!(bufs.len(), 1, "Invalid number of arguments");
 
-  let rid = args.rid as u32;
+  let rid = args.rid;
   let mut buf = bufs.into_iter().next().unwrap();
 
   let resource = state

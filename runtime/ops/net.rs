@@ -5,7 +5,6 @@ use crate::permissions::Permissions;
 use crate::resolve_addr::resolve_addr;
 use crate::resolve_addr::resolve_addr_sync;
 use deno_core::error::bad_resource;
-use deno_core::error::bad_resource_id;
 use deno_core::error::custom_error;
 use deno_core::error::generic_error;
 use deno_core::error::type_error;
@@ -20,6 +19,7 @@ use deno_core::CancelTryFuture;
 use deno_core::OpState;
 use deno_core::RcRef;
 use deno_core::Resource;
+use deno_core::ResourceId;
 use deno_core::ZeroCopyBuf;
 use serde::Deserialize;
 use serde::Serialize;
@@ -27,7 +27,6 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::rc::Rc;
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
@@ -42,14 +41,13 @@ use trust_dns_resolver::AsyncResolver;
 #[cfg(unix)]
 use super::net_unix;
 #[cfg(unix)]
-use crate::ops::io::StreamResource;
+use crate::ops::io::UnixStreamResource;
 #[cfg(unix)]
 use std::path::Path;
 
 pub fn init(rt: &mut deno_core::JsRuntime) {
   super::reg_json_async(rt, "op_accept", op_accept);
   super::reg_json_async(rt, "op_connect", op_connect);
-  super::reg_json_async(rt, "op_shutdown", op_shutdown);
   super::reg_json_sync(rt, "op_listen", op_listen);
   super::reg_json_async(rt, "op_datagram_receive", op_datagram_receive);
   super::reg_json_async(rt, "op_datagram_send", op_datagram_send);
@@ -58,7 +56,7 @@ pub fn init(rt: &mut deno_core::JsRuntime) {
 
 #[derive(Deserialize)]
 pub(crate) struct AcceptArgs {
-  pub rid: i32,
+  pub rid: ResourceId,
   pub transport: String,
 }
 
@@ -67,7 +65,7 @@ async fn accept_tcp(
   args: AcceptArgs,
   _zero_copy: BufVec,
 ) -> Result<Value, AnyError> {
-  let rid = args.rid as u32;
+  let rid = args.rid;
 
   let resource = state
     .borrow()
@@ -128,7 +126,7 @@ async fn op_accept(
 
 #[derive(Deserialize)]
 pub(crate) struct ReceiveArgs {
-  pub rid: i32,
+  pub rid: ResourceId,
   pub transport: String,
 }
 
@@ -140,7 +138,7 @@ async fn receive_udp(
   assert_eq!(zero_copy.len(), 1, "Invalid number of arguments");
   let mut zero_copy = zero_copy[0].clone();
 
-  let rid = args.rid as u32;
+  let rid = args.rid;
 
   let resource = state
     .borrow_mut()
@@ -184,7 +182,7 @@ async fn op_datagram_receive(
 
 #[derive(Deserialize)]
 struct SendArgs {
-  rid: i32,
+  rid: ResourceId,
   transport: String,
   #[serde(flatten)]
   transport_args: ArgsEnum,
@@ -207,7 +205,8 @@ async fn op_datagram_send(
       {
         let s = state.borrow();
         s.borrow::<Permissions>()
-          .check_net(&(&args.hostname, Some(args.port)))?;
+          .net
+          .check(&(&args.hostname, Some(args.port)))?;
       }
       let addr = resolve_addr(&args.hostname, args.port)
         .await?
@@ -217,7 +216,7 @@ async fn op_datagram_send(
       let resource = state
         .borrow_mut()
         .resource_table
-        .get::<UdpSocketResource>(rid as u32)
+        .get::<UdpSocketResource>(rid)
         .ok_or_else(|| bad_resource("Socket has been closed"))?;
       let socket = RcRef::map(&resource, |r| &r.socket).borrow().await;
       let byte_length = socket.send_to(&zero_copy, &addr).await?;
@@ -232,12 +231,12 @@ async fn op_datagram_send(
       let address_path = Path::new(&args.path);
       {
         let s = state.borrow();
-        s.borrow::<Permissions>().check_write(&address_path)?;
+        s.borrow::<Permissions>().write.check(&address_path)?;
       }
       let resource = state
         .borrow()
         .resource_table
-        .get::<net_unix::UnixDatagramResource>(rid as u32)
+        .get::<net_unix::UnixDatagramResource>(rid)
         .ok_or_else(|| {
           custom_error("NotConnected", "Socket has been closed")
         })?;
@@ -272,7 +271,8 @@ async fn op_connect(
         let state_ = state.borrow();
         state_
           .borrow::<Permissions>()
-          .check_net(&(&args.hostname, Some(args.port)))?;
+          .net
+          .check(&(&args.hostname, Some(args.port)))?;
       }
       let addr = resolve_addr(&args.hostname, args.port)
         .await?
@@ -309,8 +309,8 @@ async fn op_connect(
       super::check_unstable2(&state, "Deno.connect");
       {
         let state_ = state.borrow();
-        state_.borrow::<Permissions>().check_read(&address_path)?;
-        state_.borrow::<Permissions>().check_write(&address_path)?;
+        state_.borrow::<Permissions>().read.check(&address_path)?;
+        state_.borrow::<Permissions>().write.check(&address_path)?;
       }
       let path = args.path;
       let unix_stream = net_unix::UnixStream::connect(Path::new(&path)).await?;
@@ -318,7 +318,7 @@ async fn op_connect(
       let remote_addr = unix_stream.peer_addr()?;
 
       let mut state_ = state.borrow_mut();
-      let resource = StreamResource::unix_stream(unix_stream);
+      let resource = UnixStreamResource::new(unix_stream.into_split());
       let rid = state_.resource_table.add(resource);
       Ok(json!({
         "rid": rid,
@@ -334,44 +334,6 @@ async fn op_connect(
     }
     _ => Err(type_error("Wrong argument format!")),
   }
-}
-
-#[derive(Deserialize)]
-struct ShutdownArgs {
-  rid: i32,
-}
-
-async fn op_shutdown(
-  state: Rc<RefCell<OpState>>,
-  args: Value,
-  _zero_copy: BufVec,
-) -> Result<Value, AnyError> {
-  let args: ShutdownArgs = serde_json::from_value(args)?;
-  let rid = args.rid as u32;
-
-  let resource = state
-    .borrow()
-    .resource_table
-    .get_any(rid)
-    .ok_or_else(bad_resource_id)?;
-  if let Some(stream) = resource.downcast_rc::<TcpStreamResource>() {
-    let mut wr = stream.wr_borrow_mut().await;
-    wr.shutdown().await?;
-    return Ok(json!({}));
-  }
-
-  #[cfg(unix)]
-  if let Some(stream) = resource.downcast_rc::<StreamResource>() {
-    if stream.unix_stream.is_some() {
-      let mut wr = RcRef::map(stream, |r| r.unix_stream.as_ref().unwrap())
-        .borrow_mut()
-        .await;
-      wr.shutdown().await?;
-      return Ok(json!({}));
-    }
-  }
-
-  Err(bad_resource_id())
 }
 
 struct TcpListenerResource {
@@ -474,7 +436,7 @@ fn op_listen(
         if transport == "udp" {
           super::check_unstable(state, "Deno.listenDatagram");
         }
-        permissions.check_net(&(&args.hostname, Some(args.port)))?;
+        permissions.net.check(&(&args.hostname, Some(args.port)))?;
       }
       let addr = resolve_addr_sync(&args.hostname, args.port)?
         .next()
@@ -512,8 +474,8 @@ fn op_listen(
         if transport == "unixpacket" {
           super::check_unstable(state, "Deno.listenDatagram");
         }
-        permissions.check_read(&address_path)?;
-        permissions.check_write(&address_path)?;
+        permissions.read.check(&address_path)?;
+        permissions.write.check(&address_path)?;
       }
       let (rid, local_addr) = if transport == "unix" {
         net_unix::listen_unix(state, &address_path)?
@@ -559,42 +521,42 @@ enum DnsReturnRecord {
   TXT(Vec<String>),
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveAddrArgs {
+  query: String,
+  record_type: RecordType,
+  options: Option<ResolveDnsOption>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveDnsOption {
+  name_server: Option<NameServer>,
+}
+
+fn default_port() -> u16 {
+  53
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NameServer {
+  ip_addr: String,
+  #[serde(default = "default_port")]
+  port: u16,
+}
+
 async fn op_dns_resolve(
   state: Rc<RefCell<OpState>>,
-  args: Value,
+  args: ResolveAddrArgs,
   _zero_copy: BufVec,
 ) -> Result<Value, AnyError> {
-  fn default_port() -> u16 {
-    53
-  }
-
-  #[derive(Deserialize)]
-  #[serde(rename_all = "camelCase")]
-  struct ResolveAddrArgs {
-    query: String,
-    record_type: RecordType,
-    options: Option<ResolveDnsOption>,
-  }
-
-  #[derive(Deserialize)]
-  #[serde(rename_all = "camelCase")]
-  struct ResolveDnsOption {
-    name_server: Option<NameServer>,
-  }
-
-  #[derive(Deserialize)]
-  #[serde(rename_all = "camelCase")]
-  struct NameServer {
-    ip_addr: String,
-    #[serde(default = "default_port")]
-    port: u16,
-  }
-
   let ResolveAddrArgs {
     query,
     record_type,
     options,
-  } = serde_json::from_value(args)?;
+  } = args;
 
   let (config, opts) = if let Some(name_server) =
     options.as_ref().and_then(|o| o.name_server.as_ref())
@@ -621,7 +583,7 @@ async fn op_dns_resolve(
       let socker_addr = &ns.socket_addr;
       let ip = socker_addr.ip().to_string();
       let port = socker_addr.port();
-      perm.check_net(&(ip, Some(port)))?;
+      perm.net.check(&(ip, Some(port)))?;
     }
   }
 

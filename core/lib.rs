@@ -15,6 +15,8 @@ mod module_specifier;
 mod modules;
 mod normalize_path;
 mod ops;
+mod ops_bin;
+mod ops_json;
 pub mod plugin_api;
 mod resources;
 mod runtime;
@@ -42,8 +44,13 @@ pub use crate::async_cell::AsyncRefFuture;
 pub use crate::async_cell::RcLike;
 pub use crate::async_cell::RcRef;
 pub use crate::flags::v8_set_flags;
+pub use crate::module_specifier::resolve_import;
+pub use crate::module_specifier::resolve_path;
+pub use crate::module_specifier::resolve_url;
+pub use crate::module_specifier::resolve_url_or_path;
 pub use crate::module_specifier::ModuleResolutionError;
 pub use crate::module_specifier::ModuleSpecifier;
+pub use crate::module_specifier::DUMMY_SPECIFIER;
 pub use crate::modules::FsModuleLoader;
 pub use crate::modules::ModuleId;
 pub use crate::modules::ModuleLoadId;
@@ -53,8 +60,6 @@ pub use crate::modules::ModuleSourceFuture;
 pub use crate::modules::NoopModuleLoader;
 pub use crate::modules::RecursiveModuleLoad;
 pub use crate::normalize_path::normalize_path;
-pub use crate::ops::json_op_async;
-pub use crate::ops::json_op_sync;
 pub use crate::ops::op_close;
 pub use crate::ops::op_resources;
 pub use crate::ops::Op;
@@ -63,6 +68,11 @@ pub use crate::ops::OpFn;
 pub use crate::ops::OpId;
 pub use crate::ops::OpState;
 pub use crate::ops::OpTable;
+pub use crate::ops_bin::bin_op_async;
+pub use crate::ops_bin::bin_op_sync;
+pub use crate::ops_bin::ValueOrVector;
+pub use crate::ops_json::json_op_async;
+pub use crate::ops_json::json_op_sync;
 pub use crate::resources::Resource;
 pub use crate::resources::ResourceId;
 pub use crate::resources::ResourceTable;
@@ -78,7 +88,12 @@ pub fn v8_version() -> &'static str {
   v8::V8::get_version()
 }
 
-#[test]
-fn test_v8_version() {
-  assert!(v8_version().len() > 3);
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_v8_version() {
+    assert!(v8_version().len() > 3);
+  }
 }

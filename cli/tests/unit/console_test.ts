@@ -15,7 +15,7 @@ import {
   assertThrows,
   unitTest,
 } from "./test_util.ts";
-import { stripColor } from "../../../std/fmt/colors.ts";
+import { stripColor } from "../../../test_util/std/fmt/colors.ts";
 
 const customInspect = Deno.customInspect;
 const {
@@ -310,18 +310,18 @@ unitTest(function consoleTestStringifyCircular(): void {
   assertEquals(stringify(nestedObj), nestedObjExpected);
   assertEquals(
     stringify(JSON),
-    'JSON { [Symbol(Symbol.toStringTag)]: "JSON" }',
+    "JSON {}",
   );
   assertEquals(
     stringify(console),
     `console {
   log: [Function: log],
-  debug: [Function: log],
-  info: [Function: log],
+  debug: [Function: debug],
+  info: [Function: info],
   dir: [Function: dir],
   dirxml: [Function: dir],
   warn: [Function: warn],
-  error: [Function: warn],
+  error: [Function: error],
   assert: [Function: assert],
   count: [Function: count],
   countReset: [Function: countReset],
@@ -335,7 +335,6 @@ unitTest(function consoleTestStringifyCircular(): void {
   clear: [Function: clear],
   trace: [Function: trace],
   indentLevel: 0,
-  [Symbol(Symbol.toStringTag)]: "console",
   [Symbol(isConsoleInstance)]: true
 }`,
   );
@@ -360,6 +359,50 @@ unitTest(function consoleTestStringifyFunctionWithPrototypeRemoved(): void {
   const agf = async function* agf() {};
   Reflect.setPrototypeOf(agf, null);
   assertEquals(stringify(agf), "[Function: agf]");
+});
+
+unitTest(function consoleTestStringifyFunctionWithProperties(): void {
+  const f = () => "test";
+  f.x = () => "foo";
+  f.y = 3;
+  f.z = () => "baz";
+  f.b = function bar() {};
+  f.a = new Map();
+  assertEquals(
+    stringify({ f }),
+    `{
+  f: [Function: f] { x: [Function], y: 3, z: [Function], b: [Function: bar], a: Map {} }
+}`,
+  );
+
+  const t = () => {};
+  t.x = f;
+  f.s = f;
+  f.t = t;
+  assertEquals(
+    stringify({ f }),
+    `{
+  f: [Function: f] {
+    x: [Function],
+    y: 3,
+    z: [Function],
+    b: [Function: bar],
+    a: Map {},
+    s: [Circular],
+    t: [Function: t] { x: [Circular] }
+  }
+}`,
+  );
+
+  assertEquals(
+    stringify(Array),
+    `[Function: Array]`,
+  );
+
+  assertEquals(
+    stripColor(Deno.inspect(Array, { showHidden: true })),
+    `[Function: Array] { [Symbol(Symbol.species)]: [Getter] }`,
+  );
 });
 
 unitTest(function consoleTestStringifyWithDepth(): void {
@@ -1148,9 +1191,9 @@ function mockConsole(f: ConsoleExamineFunc): void {
   const err = new StringBuffer();
   const both = new StringBuffer();
   const csl = new Console(
-    (x: string, isErr: boolean, printsNewLine: boolean): void => {
+    (x: string, level: number, printsNewLine: boolean): void => {
       const content = x + (printsNewLine ? "\n" : "");
-      const buf = isErr ? err : out;
+      const buf = level > 1 ? err : out;
       buf.add(content);
       both.add(content);
     },

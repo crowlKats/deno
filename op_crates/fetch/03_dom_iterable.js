@@ -1,8 +1,8 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
+"use strict";
 
 ((window) => {
   const { requiredArguments } = window.__bootstrap.fetchUtil;
-  // const { exposeForTest } = window.__bootstrap.internals;
 
   function DomIterableMixin(
     Base,
@@ -69,7 +69,10 @@
     return DomIterable;
   }
 
-  // exposeForTest("DomIterableMixin", DomIterableMixin);
+  window.__bootstrap.internals = {
+    ...window.__bootstrap.internals ?? {},
+    DomIterableMixin,
+  };
 
   window.__bootstrap.domIterable = {
     DomIterableMixin,
