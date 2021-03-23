@@ -5,13 +5,15 @@ use deno_core::error::AnyError;
 use deno_core::error::{bad_resource_id, resource_unavailable};
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
-use deno_core::OpState;
+use deno_core::{OpState, BufVec};
 use deno_core::Resource;
 use deno_core::{serde_json, ZeroCopyBuf};
 use deno_core::{AsyncRefCell, JsRuntime, RcRef};
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::io::{Read, Write};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 struct WebSerialPortResource(AsyncRefCell<Box<dyn serialport::SerialPort>>);
 
@@ -34,11 +36,9 @@ struct OpenArgs {
 
 pub fn op_webserial_open(
   state: &mut OpState,
-  args: Value,
+  args: OpenArgs,
   _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<Value, AnyError> {
-  let args: OpenArgs = serde_json::from_value(args)?;
-
   let port = serialport::new(args.device, args.baud_rate)
     .data_bits(match args.data_bits {
       Some(7) => serialport::DataBits::Seven,
@@ -78,13 +78,12 @@ struct ReadArgs {
   rid: u32,
 }
 
-pub fn op_webserial_read(
-  state: &mut OpState,
-  args: Value,
-  zero_copy: &mut [ZeroCopyBuf],
+pub async fn op_webserial_read(
+  state: Rc<RefCell<OpState>>,
+  args: ReadArgs,
+  mut bufs: BufVec,
 ) -> Result<Value, AnyError> {
-  let args: ReadArgs = serde_json::from_value(args)?;
-
+  let mut state = state.borrow_mut();
   let resource = state
     .resource_table
     .get::<WebSerialPortResource>(args.rid)
@@ -93,7 +92,7 @@ pub fn op_webserial_read(
     .try_borrow_mut()
     .ok_or_else(resource_unavailable)?;
 
-  port.read_exact(zero_copy[0].as_mut())?;
+  port.read_exact(bufs[0].as_mut())?;
 
   Ok(json!({}))
 }
@@ -104,13 +103,12 @@ struct WriteArgs {
   rid: u32,
 }
 
-pub fn op_webserial_write(
-  state: &mut OpState,
-  args: Value,
-  zero_copy: &mut [ZeroCopyBuf],
+pub async fn op_webserial_write(
+  state: Rc<RefCell<OpState>>,
+  args: WriteArgs,
+  bufs: BufVec,
 ) -> Result<Value, AnyError> {
-  let args: WriteArgs = serde_json::from_value(args)?;
-
+  let mut state = state.borrow_mut();
   let resource = state
     .resource_table
     .get::<WebSerialPortResource>(args.rid)
@@ -119,7 +117,7 @@ pub fn op_webserial_write(
     .try_borrow_mut()
     .ok_or_else(resource_unavailable)?;
 
-  port.write_all(&*zero_copy[0])?;
+  port.write_all(&*bufs[0])?;
 
   Ok(json!({}))
 }
@@ -136,11 +134,9 @@ struct SetSignalsArgs {
 
 pub fn op_webserial_set_signals(
   state: &mut OpState,
-  args: Value,
+  args: SetSignalsArgs,
   _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<Value, AnyError> {
-  let args: SetSignalsArgs = serde_json::from_value(args)?;
-
   let resource = state
     .resource_table
     .get::<WebSerialPortResource>(args.rid)
@@ -176,11 +172,9 @@ struct GetSignalsArgs {
 
 pub fn op_webserial_get_signals(
   state: &mut OpState,
-  args: Value,
+  args: GetSignalsArgs,
   _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<Value, AnyError> {
-  let args: GetSignalsArgs = serde_json::from_value(args)?;
-
   let resource = state
     .resource_table
     .get::<WebSerialPortResource>(args.rid)

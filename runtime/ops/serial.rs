@@ -6,12 +6,12 @@ pub fn init(rt: &mut deno_core::JsRuntime) {
     "op_webserial_open",
     deno_webserial::op_webserial_open,
   );
-  super::reg_json_sync(
+  super::reg_json_async(
     rt,
     "op_webserial_read",
     deno_webserial::op_webserial_read,
   );
-  super::reg_json_sync(
+  super::reg_json_async(
     rt,
     "op_webserial_write",
     deno_webserial::op_webserial_write,
