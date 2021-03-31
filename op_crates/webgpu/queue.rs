@@ -5,17 +5,18 @@ use deno_core::error::AnyError;
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
 use deno_core::OpState;
+use deno_core::ResourceId;
 use deno_core::ZeroCopyBuf;
 use serde::Deserialize;
 
-use super::error::WebGPUError;
+use super::error::WebGpuError;
 
-type WebGPUQueue = super::WebGPUDevice;
+type WebGpuQueue = super::WebGpuDevice;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueSubmitArgs {
-  queue_rid: u32,
+  queue_rid: ResourceId,
   command_buffers: Vec<u32>,
 }
 
@@ -27,7 +28,7 @@ pub fn op_webgpu_queue_submit(
   let instance = state.borrow::<super::Instance>();
   let queue_resource = state
     .resource_table
-    .get::<WebGPUQueue>(args.queue_rid)
+    .get::<WebGpuQueue>(args.queue_rid)
     .ok_or_else(bad_resource_id)?;
   let queue = queue_resource.0;
 
@@ -36,7 +37,7 @@ pub fn op_webgpu_queue_submit(
   for rid in args.command_buffers {
     let buffer_resource = state
       .resource_table
-      .get::<super::command_encoder::WebGPUCommandBuffer>(rid)
+      .get::<super::command_encoder::WebGpuCommandBuffer>(rid)
       .ok_or_else(bad_resource_id)?;
     ids.push(buffer_resource.0);
   }
@@ -44,12 +45,12 @@ pub fn op_webgpu_queue_submit(
   let maybe_err =
     gfx_select!(queue => instance.queue_submit(queue, &ids)).err();
 
-  Ok(json!({ "err": maybe_err.map(WebGPUError::from) }))
+  Ok(json!({ "err": maybe_err.map(WebGpuError::from) }))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GPUImageDataLayout {
+struct GpuImageDataLayout {
   offset: Option<u64>,
   bytes_per_row: Option<u32>,
   rows_per_image: Option<u32>,
@@ -58,7 +59,7 @@ struct GPUImageDataLayout {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueWriteBufferArgs {
-  queue_rid: u32,
+  queue_rid: ResourceId,
   buffer: u32,
   buffer_offset: u64,
   data_offset: usize,
@@ -73,12 +74,12 @@ pub fn op_webgpu_write_buffer(
   let instance = state.borrow::<super::Instance>();
   let buffer_resource = state
     .resource_table
-    .get::<super::buffer::WebGPUBuffer>(args.buffer)
+    .get::<super::buffer::WebGpuBuffer>(args.buffer)
     .ok_or_else(bad_resource_id)?;
   let buffer = buffer_resource.0;
   let queue_resource = state
     .resource_table
-    .get::<WebGPUQueue>(args.queue_rid)
+    .get::<WebGpuQueue>(args.queue_rid)
     .ok_or_else(bad_resource_id)?;
   let queue = queue_resource.0;
 
@@ -94,16 +95,16 @@ pub fn op_webgpu_write_buffer(
   ))
   .err();
 
-  Ok(json!({ "err": maybe_err.map(WebGPUError::from) }))
+  Ok(json!({ "err": maybe_err.map(WebGpuError::from) }))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueWriteTextureArgs {
-  queue_rid: u32,
-  destination: super::command_encoder::GPUImageCopyTexture,
-  data_layout: GPUImageDataLayout,
-  size: super::texture::GPUExtent3D,
+  queue_rid: ResourceId,
+  destination: super::command_encoder::GpuImageCopyTexture,
+  data_layout: GpuImageDataLayout,
+  size: super::texture::GpuExtent3D,
 }
 
 pub fn op_webgpu_write_texture(
@@ -114,11 +115,11 @@ pub fn op_webgpu_write_texture(
   let instance = state.borrow::<super::Instance>();
   let texture_resource = state
     .resource_table
-    .get::<super::texture::WebGPUTexture>(args.destination.texture)
+    .get::<super::texture::WebGpuTexture>(args.destination.texture)
     .ok_or_else(bad_resource_id)?;
   let queue_resource = state
     .resource_table
-    .get::<WebGPUQueue>(args.queue_rid)
+    .get::<WebGpuQueue>(args.queue_rid)
     .ok_or_else(bad_resource_id)?;
   let queue = queue_resource.0;
 
@@ -153,5 +154,5 @@ pub fn op_webgpu_write_texture(
   ))
   .err();
 
-  Ok(json!({ "err": maybe_err.map(WebGPUError::from) }))
+  Ok(json!({ "err": maybe_err.map(WebGpuError::from) }))
 }

@@ -1,25 +1,24 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
-
 use crate::metrics::metrics_op;
 use crate::permissions::Permissions;
 use deno_core::error::AnyError;
 use deno_core::futures::prelude::*;
 use deno_core::plugin_api;
-use deno_core::serde_json;
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
 use deno_core::BufVec;
 use deno_core::JsRuntime;
 use deno_core::Op;
 use deno_core::OpAsyncFuture;
+use deno_core::OpFn;
 use deno_core::OpId;
 use deno_core::OpState;
 use deno_core::Resource;
 use deno_core::ZeroCopyBuf;
 use dlopen::symbor::Library;
+use log::debug;
 use serde::Deserialize;
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -32,21 +31,20 @@ pub fn init(rt: &mut JsRuntime) {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct OpenPluginArgs {
+pub struct OpenPluginArgs {
   filename: String,
 }
 
 pub fn op_open_plugin(
   state: &mut OpState,
-  args: Value,
+  args: OpenPluginArgs,
   _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<Value, AnyError> {
-  let args: OpenPluginArgs = serde_json::from_value(args)?;
   let filename = PathBuf::from(&args.filename);
 
   super::check_unstable(state, "Deno.openPlugin");
   let permissions = state.borrow::<Permissions>();
-  permissions.check_plugin(&filename)?;
+  permissions.plugin.check()?;
 
   debug!("Loading Plugin: {:#?}", filename);
   let plugin_lib = Library::open(filename).map(Rc::new)?;
@@ -112,11 +110,17 @@ impl<'a> plugin_api::Interface for PluginInterface<'a> {
     dispatch_op_fn: plugin_api::DispatchOpFn,
   ) -> OpId {
     let plugin_lib = self.plugin_lib.clone();
-    let plugin_op_fn = move |state_rc: Rc<RefCell<OpState>>,
-                             mut zero_copy: BufVec| {
+    let plugin_op_fn: Box<OpFn> = Box::new(move |state_rc, _payload, buf| {
+      // For sig compat map Option<ZeroCopyBuf> to BufVec
+      let mut bufs: BufVec = match buf {
+        Some(b) => vec![b],
+        None => vec![],
+      }
+      .into();
+
       let mut state = state_rc.borrow_mut();
       let mut interface = PluginInterface::new(&mut state, &plugin_lib);
-      let op = dispatch_op_fn(&mut interface, &mut zero_copy);
+      let op = dispatch_op_fn(&mut interface, &mut bufs);
       match op {
         sync_op @ Op::Sync(..) => sync_op,
         Op::Async(fut) => Op::Async(PluginOpAsyncFuture::new(&plugin_lib, fut)),
@@ -125,13 +129,10 @@ impl<'a> plugin_api::Interface for PluginInterface<'a> {
         }
         _ => unreachable!(),
       }
-    };
+    });
     self.state.op_table.register_op(
       name,
-      metrics_op(
-        Box::leak(Box::new(name.to_string())),
-        Box::new(plugin_op_fn),
-      ),
+      metrics_op(Box::leak(Box::new(name.to_string())), plugin_op_fn),
     )
   }
 }

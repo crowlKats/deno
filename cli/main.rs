@@ -2,11 +2,6 @@
 
 #![deny(warnings)]
 
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate log;
-
 mod ast;
 mod auth_tokens;
 mod checksum;
@@ -70,6 +65,8 @@ use deno_runtime::web_worker::WebWorker;
 use deno_runtime::web_worker::WebWorkerOptions;
 use deno_runtime::worker::MainWorker;
 use deno_runtime::worker::WorkerOptions;
+use log::debug;
+use log::info;
 use log::Level;
 use log::LevelFilter;
 use std::env;
@@ -278,7 +275,7 @@ fn print_cache_info(
 
 pub fn get_types(unstable: bool) -> String {
   let mut types = format!(
-    "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+    "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
     crate::tsc::DENO_NS_LIB,
     crate::tsc::DENO_CONSOLE_LIB,
     crate::tsc::DENO_URL_LIB,
@@ -286,6 +283,7 @@ pub fn get_types(unstable: bool) -> String {
     crate::tsc::DENO_FETCH_LIB,
     crate::tsc::DENO_WEBGPU_LIB,
     crate::tsc::DENO_WEBSOCKET_LIB,
+    crate::tsc::DENO_CRYPTO_LIB,
     crate::tsc::SHARED_GLOBALS_LIB,
     crate::tsc::WINDOW_LIB,
   );
@@ -497,11 +495,11 @@ async fn eval_command(
     media_type: if ext.as_str() == "ts" {
       MediaType::TypeScript
     } else if ext.as_str() == "tsx" {
-      MediaType::TSX
+      MediaType::Tsx
     } else if ext.as_str() == "js" {
       MediaType::JavaScript
     } else {
-      MediaType::JSX
+      MediaType::Jsx
     },
     source: String::from_utf8(source_code)?,
     specifier: main_module.clone(),
@@ -1158,13 +1156,7 @@ fn unwrap_or_exit<T>(result: Result<T, AnyError>) -> T {
   match result {
     Ok(value) => value,
     Err(error) => {
-      let msg = format!(
-        "{}: {}",
-        colors::red_bold("error"),
-        // TODO(lucacasonato): print anyhow error chain here
-        error.to_string().trim()
-      );
-      eprintln!("{}", msg);
+      eprintln!("{}: {:?}", colors::red_bold("error"), error);
       std::process::exit(1);
     }
   }

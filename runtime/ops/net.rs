@@ -1,5 +1,4 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
-
 use crate::ops::io::TcpStreamResource;
 use crate::permissions::Permissions;
 use crate::resolve_addr::resolve_addr;
@@ -19,7 +18,9 @@ use deno_core::CancelTryFuture;
 use deno_core::OpState;
 use deno_core::RcRef;
 use deno_core::Resource;
+use deno_core::ResourceId;
 use deno_core::ZeroCopyBuf;
+use log::debug;
 use serde::Deserialize;
 use serde::Serialize;
 use std::borrow::Cow;
@@ -55,7 +56,7 @@ pub fn init(rt: &mut deno_core::JsRuntime) {
 
 #[derive(Deserialize)]
 pub(crate) struct AcceptArgs {
-  pub rid: i32,
+  pub rid: ResourceId,
   pub transport: String,
 }
 
@@ -64,7 +65,7 @@ async fn accept_tcp(
   args: AcceptArgs,
   _zero_copy: BufVec,
 ) -> Result<Value, AnyError> {
-  let rid = args.rid as u32;
+  let rid = args.rid;
 
   let resource = state
     .borrow()
@@ -125,7 +126,7 @@ async fn op_accept(
 
 #[derive(Deserialize)]
 pub(crate) struct ReceiveArgs {
-  pub rid: i32,
+  pub rid: ResourceId,
   pub transport: String,
 }
 
@@ -137,7 +138,7 @@ async fn receive_udp(
   assert_eq!(zero_copy.len(), 1, "Invalid number of arguments");
   let mut zero_copy = zero_copy[0].clone();
 
-  let rid = args.rid as u32;
+  let rid = args.rid;
 
   let resource = state
     .borrow_mut()
@@ -181,7 +182,7 @@ async fn op_datagram_receive(
 
 #[derive(Deserialize)]
 struct SendArgs {
-  rid: i32,
+  rid: ResourceId,
   transport: String,
   #[serde(flatten)]
   transport_args: ArgsEnum,
@@ -204,7 +205,8 @@ async fn op_datagram_send(
       {
         let s = state.borrow();
         s.borrow::<Permissions>()
-          .check_net(&(&args.hostname, Some(args.port)))?;
+          .net
+          .check(&(&args.hostname, Some(args.port)))?;
       }
       let addr = resolve_addr(&args.hostname, args.port)
         .await?
@@ -214,7 +216,7 @@ async fn op_datagram_send(
       let resource = state
         .borrow_mut()
         .resource_table
-        .get::<UdpSocketResource>(rid as u32)
+        .get::<UdpSocketResource>(rid)
         .ok_or_else(|| bad_resource("Socket has been closed"))?;
       let socket = RcRef::map(&resource, |r| &r.socket).borrow().await;
       let byte_length = socket.send_to(&zero_copy, &addr).await?;
@@ -229,12 +231,12 @@ async fn op_datagram_send(
       let address_path = Path::new(&args.path);
       {
         let s = state.borrow();
-        s.borrow::<Permissions>().check_write(&address_path)?;
+        s.borrow::<Permissions>().write.check(&address_path)?;
       }
       let resource = state
         .borrow()
         .resource_table
-        .get::<net_unix::UnixDatagramResource>(rid as u32)
+        .get::<net_unix::UnixDatagramResource>(rid)
         .ok_or_else(|| {
           custom_error("NotConnected", "Socket has been closed")
         })?;
@@ -269,7 +271,8 @@ async fn op_connect(
         let state_ = state.borrow();
         state_
           .borrow::<Permissions>()
-          .check_net(&(&args.hostname, Some(args.port)))?;
+          .net
+          .check(&(&args.hostname, Some(args.port)))?;
       }
       let addr = resolve_addr(&args.hostname, args.port)
         .await?
@@ -306,8 +309,8 @@ async fn op_connect(
       super::check_unstable2(&state, "Deno.connect");
       {
         let state_ = state.borrow();
-        state_.borrow::<Permissions>().check_read(&address_path)?;
-        state_.borrow::<Permissions>().check_write(&address_path)?;
+        state_.borrow::<Permissions>().read.check(&address_path)?;
+        state_.borrow::<Permissions>().write.check(&address_path)?;
       }
       let path = args.path;
       let unix_stream = net_unix::UnixStream::connect(Path::new(&path)).await?;
@@ -433,7 +436,7 @@ fn op_listen(
         if transport == "udp" {
           super::check_unstable(state, "Deno.listenDatagram");
         }
-        permissions.check_net(&(&args.hostname, Some(args.port)))?;
+        permissions.net.check(&(&args.hostname, Some(args.port)))?;
       }
       let addr = resolve_addr_sync(&args.hostname, args.port)?
         .next()
@@ -471,8 +474,8 @@ fn op_listen(
         if transport == "unixpacket" {
           super::check_unstable(state, "Deno.listenDatagram");
         }
-        permissions.check_read(&address_path)?;
-        permissions.check_write(&address_path)?;
+        permissions.read.check(&address_path)?;
+        permissions.write.check(&address_path)?;
       }
       let (rid, local_addr) = if transport == "unix" {
         net_unix::listen_unix(state, &address_path)?
@@ -501,59 +504,59 @@ fn op_listen(
 #[serde(untagged)]
 enum DnsReturnRecord {
   A(String),
-  AAAA(String),
-  ANAME(String),
-  CNAME(String),
-  MX {
+  Aaaa(String),
+  Aname(String),
+  Cname(String),
+  Mx {
     preference: u16,
     exchange: String,
   },
-  PTR(String),
-  SRV {
+  Ptr(String),
+  Srv {
     priority: u16,
     weight: u16,
     port: u16,
     target: String,
   },
-  TXT(Vec<String>),
+  Txt(Vec<String>),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveAddrArgs {
+  query: String,
+  record_type: RecordType,
+  options: Option<ResolveDnsOption>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveDnsOption {
+  name_server: Option<NameServer>,
+}
+
+fn default_port() -> u16 {
+  53
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NameServer {
+  ip_addr: String,
+  #[serde(default = "default_port")]
+  port: u16,
 }
 
 async fn op_dns_resolve(
   state: Rc<RefCell<OpState>>,
-  args: Value,
+  args: ResolveAddrArgs,
   _zero_copy: BufVec,
 ) -> Result<Value, AnyError> {
-  fn default_port() -> u16 {
-    53
-  }
-
-  #[derive(Deserialize)]
-  #[serde(rename_all = "camelCase")]
-  struct ResolveAddrArgs {
-    query: String,
-    record_type: RecordType,
-    options: Option<ResolveDnsOption>,
-  }
-
-  #[derive(Deserialize)]
-  #[serde(rename_all = "camelCase")]
-  struct ResolveDnsOption {
-    name_server: Option<NameServer>,
-  }
-
-  #[derive(Deserialize)]
-  #[serde(rename_all = "camelCase")]
-  struct NameServer {
-    ip_addr: String,
-    #[serde(default = "default_port")]
-    port: u16,
-  }
-
   let ResolveAddrArgs {
     query,
     record_type,
     options,
-  } = serde_json::from_value(args)?;
+  } = args;
 
   let (config, opts) = if let Some(name_server) =
     options.as_ref().and_then(|o| o.name_server.as_ref())
@@ -580,7 +583,7 @@ async fn op_dns_resolve(
       let socker_addr = &ns.socket_addr;
       let ip = socker_addr.ip().to_string();
       let port = socker_addr.port();
-      perm.check_net(&(ip, Some(port)))?;
+      perm.net.check(&(ip, Some(port)))?;
     }
   }
 
@@ -607,24 +610,24 @@ fn rdata_to_return_record(
       AAAA => r
         .as_aaaa()
         .map(ToString::to_string)
-        .map(DnsReturnRecord::AAAA),
+        .map(DnsReturnRecord::Aaaa),
       ANAME => r
         .as_aname()
         .map(ToString::to_string)
-        .map(DnsReturnRecord::ANAME),
+        .map(DnsReturnRecord::Aname),
       CNAME => r
         .as_cname()
         .map(ToString::to_string)
-        .map(DnsReturnRecord::CNAME),
-      MX => r.as_mx().map(|mx| DnsReturnRecord::MX {
+        .map(DnsReturnRecord::Cname),
+      MX => r.as_mx().map(|mx| DnsReturnRecord::Mx {
         preference: mx.preference(),
         exchange: mx.exchange().to_string(),
       }),
       PTR => r
         .as_ptr()
         .map(ToString::to_string)
-        .map(DnsReturnRecord::PTR),
-      SRV => r.as_srv().map(|srv| DnsReturnRecord::SRV {
+        .map(DnsReturnRecord::Ptr),
+      SRV => r.as_srv().map(|srv| DnsReturnRecord::Srv {
         priority: srv.priority(),
         weight: srv.weight(),
         port: srv.port(),
@@ -638,7 +641,7 @@ fn rdata_to_return_record(
             bytes.iter().map(|&b| b as char).collect::<String>()
           })
           .collect();
-        DnsReturnRecord::TXT(texts)
+        DnsReturnRecord::Txt(texts)
       }),
       // TODO(magurotuna): Other record types are not supported
       _ => todo!(),
@@ -671,21 +674,21 @@ mod tests {
   fn rdata_to_return_record_aaaa() {
     let func = rdata_to_return_record(RecordType::AAAA);
     let rdata = RData::AAAA(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
-    assert_eq!(func(&rdata), Some(DnsReturnRecord::AAAA("::1".to_string())));
+    assert_eq!(func(&rdata), Some(DnsReturnRecord::Aaaa("::1".to_string())));
   }
 
   #[test]
   fn rdata_to_return_record_aname() {
     let func = rdata_to_return_record(RecordType::ANAME);
     let rdata = RData::ANAME(Name::new());
-    assert_eq!(func(&rdata), Some(DnsReturnRecord::ANAME("".to_string())));
+    assert_eq!(func(&rdata), Some(DnsReturnRecord::Aname("".to_string())));
   }
 
   #[test]
   fn rdata_to_return_record_cname() {
     let func = rdata_to_return_record(RecordType::CNAME);
     let rdata = RData::CNAME(Name::new());
-    assert_eq!(func(&rdata), Some(DnsReturnRecord::CNAME("".to_string())));
+    assert_eq!(func(&rdata), Some(DnsReturnRecord::Cname("".to_string())));
   }
 
   #[test]
@@ -694,7 +697,7 @@ mod tests {
     let rdata = RData::MX(MX::new(10, Name::new()));
     assert_eq!(
       func(&rdata),
-      Some(DnsReturnRecord::MX {
+      Some(DnsReturnRecord::Mx {
         preference: 10,
         exchange: "".to_string()
       })
@@ -705,7 +708,7 @@ mod tests {
   fn rdata_to_return_record_ptr() {
     let func = rdata_to_return_record(RecordType::PTR);
     let rdata = RData::PTR(Name::new());
-    assert_eq!(func(&rdata), Some(DnsReturnRecord::PTR("".to_string())));
+    assert_eq!(func(&rdata), Some(DnsReturnRecord::Ptr("".to_string())));
   }
 
   #[test]
@@ -714,7 +717,7 @@ mod tests {
     let rdata = RData::SRV(SRV::new(1, 2, 3, Name::new()));
     assert_eq!(
       func(&rdata),
-      Some(DnsReturnRecord::SRV {
+      Some(DnsReturnRecord::Srv {
         priority: 1,
         weight: 2,
         port: 3,
@@ -734,7 +737,7 @@ mod tests {
     ]));
     assert_eq!(
       func(&rdata),
-      Some(DnsReturnRecord::TXT(vec![
+      Some(DnsReturnRecord::Txt(vec![
         "foo".to_string(),
         "bar".to_string(),
         "£".to_string(),

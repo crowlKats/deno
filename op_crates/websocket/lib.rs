@@ -19,6 +19,7 @@ use deno_core::JsRuntime;
 use deno_core::OpState;
 use deno_core::RcRef;
 use deno_core::Resource;
+use deno_core::ResourceId;
 use deno_core::ZeroCopyBuf;
 
 use http::{Method, Request, Uri};
@@ -209,7 +210,7 @@ where
 #[deno_op]
 pub async fn op_ws_send(
   state: Rc<RefCell<OpState>>,
-  rid: u32,
+  rid: ResourceId,
   kind: String,
   text: Option<String>,
   bufs: BufVec,
@@ -234,7 +235,7 @@ pub async fn op_ws_send(
 #[deno_op]
 pub async fn op_ws_close(
   state: Rc<RefCell<OpState>>,
-  rid: u32,
+  rid: ResourceId,
   code: Option<u16>,
   reason: Option<String>,
 ) -> Result<Value, AnyError> {
@@ -259,7 +260,7 @@ pub async fn op_ws_close(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NextEventArgs {
-  rid: u32,
+  rid: ResourceId,
 }
 
 #[deno_op]

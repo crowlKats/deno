@@ -4,18 +4,19 @@ use deno_core::error::bad_resource_id;
 use deno_core::error::AnyError;
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
+use deno_core::ResourceId;
 use deno_core::ZeroCopyBuf;
 use deno_core::{OpState, Resource};
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::cell::RefCell;
 
-use super::error::WebGPUError;
+use super::error::WebGpuError;
 
-pub(crate) struct WebGPUComputePass(
+pub(crate) struct WebGpuComputePass(
   pub(crate) RefCell<wgpu_core::command::ComputePass>,
 );
-impl Resource for WebGPUComputePass {
+impl Resource for WebGpuComputePass {
   fn name(&self) -> Cow<str> {
     "webGPUComputePass".into()
   }
@@ -24,7 +25,7 @@ impl Resource for WebGPUComputePass {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePassSetPipelineArgs {
-  compute_pass_rid: u32,
+  compute_pass_rid: ResourceId,
   pipeline: u32,
 }
 
@@ -35,11 +36,11 @@ pub fn op_webgpu_compute_pass_set_pipeline(
 ) -> Result<Value, AnyError> {
   let compute_pipeline_resource = state
     .resource_table
-    .get::<super::pipeline::WebGPUComputePipeline>(args.pipeline)
+    .get::<super::pipeline::WebGpuComputePipeline>(args.pipeline)
     .ok_or_else(bad_resource_id)?;
   let compute_pass_resource = state
     .resource_table
-    .get::<WebGPUComputePass>(args.compute_pass_rid)
+    .get::<WebGpuComputePass>(args.compute_pass_rid)
     .ok_or_else(bad_resource_id)?;
 
   wgpu_core::command::compute_ffi::wgpu_compute_pass_set_pipeline(
@@ -53,7 +54,7 @@ pub fn op_webgpu_compute_pass_set_pipeline(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePassDispatchArgs {
-  compute_pass_rid: u32,
+  compute_pass_rid: ResourceId,
   x: u32,
   y: u32,
   z: u32,
@@ -66,7 +67,7 @@ pub fn op_webgpu_compute_pass_dispatch(
 ) -> Result<Value, AnyError> {
   let compute_pass_resource = state
     .resource_table
-    .get::<WebGPUComputePass>(args.compute_pass_rid)
+    .get::<WebGpuComputePass>(args.compute_pass_rid)
     .ok_or_else(bad_resource_id)?;
 
   wgpu_core::command::compute_ffi::wgpu_compute_pass_dispatch(
@@ -82,7 +83,7 @@ pub fn op_webgpu_compute_pass_dispatch(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePassDispatchIndirectArgs {
-  compute_pass_rid: u32,
+  compute_pass_rid: ResourceId,
   indirect_buffer: u32,
   indirect_offset: u64,
 }
@@ -94,11 +95,11 @@ pub fn op_webgpu_compute_pass_dispatch_indirect(
 ) -> Result<Value, AnyError> {
   let buffer_resource = state
     .resource_table
-    .get::<super::buffer::WebGPUBuffer>(args.indirect_buffer)
+    .get::<super::buffer::WebGpuBuffer>(args.indirect_buffer)
     .ok_or_else(bad_resource_id)?;
   let compute_pass_resource = state
     .resource_table
-    .get::<WebGPUComputePass>(args.compute_pass_rid)
+    .get::<WebGpuComputePass>(args.compute_pass_rid)
     .ok_or_else(bad_resource_id)?;
 
   wgpu_core::command::compute_ffi::wgpu_compute_pass_dispatch_indirect(
@@ -113,7 +114,7 @@ pub fn op_webgpu_compute_pass_dispatch_indirect(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePassBeginPipelineStatisticsQueryArgs {
-  compute_pass_rid: u32,
+  compute_pass_rid: ResourceId,
   query_set: u32,
   query_index: u32,
 }
@@ -125,11 +126,11 @@ pub fn op_webgpu_compute_pass_begin_pipeline_statistics_query(
 ) -> Result<Value, AnyError> {
   let compute_pass_resource = state
     .resource_table
-    .get::<WebGPUComputePass>(args.compute_pass_rid)
+    .get::<WebGpuComputePass>(args.compute_pass_rid)
     .ok_or_else(bad_resource_id)?;
   let query_set_resource = state
     .resource_table
-    .get::<super::WebGPUQuerySet>(args.query_set)
+    .get::<super::WebGpuQuerySet>(args.query_set)
     .ok_or_else(bad_resource_id)?;
 
   unsafe {
@@ -146,7 +147,7 @@ pub fn op_webgpu_compute_pass_begin_pipeline_statistics_query(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePassEndPipelineStatisticsQueryArgs {
-  compute_pass_rid: u32,
+  compute_pass_rid: ResourceId,
 }
 
 pub fn op_webgpu_compute_pass_end_pipeline_statistics_query(
@@ -156,7 +157,7 @@ pub fn op_webgpu_compute_pass_end_pipeline_statistics_query(
 ) -> Result<Value, AnyError> {
   let compute_pass_resource = state
     .resource_table
-    .get::<WebGPUComputePass>(args.compute_pass_rid)
+    .get::<WebGpuComputePass>(args.compute_pass_rid)
     .ok_or_else(bad_resource_id)?;
 
   unsafe {
@@ -171,7 +172,7 @@ pub fn op_webgpu_compute_pass_end_pipeline_statistics_query(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePassWriteTimestampArgs {
-  compute_pass_rid: u32,
+  compute_pass_rid: ResourceId,
   query_set: u32,
   query_index: u32,
 }
@@ -183,11 +184,11 @@ pub fn op_webgpu_compute_pass_write_timestamp(
 ) -> Result<Value, AnyError> {
   let compute_pass_resource = state
     .resource_table
-    .get::<WebGPUComputePass>(args.compute_pass_rid)
+    .get::<WebGpuComputePass>(args.compute_pass_rid)
     .ok_or_else(bad_resource_id)?;
   let query_set_resource = state
     .resource_table
-    .get::<super::WebGPUQuerySet>(args.query_set)
+    .get::<super::WebGpuQuerySet>(args.query_set)
     .ok_or_else(bad_resource_id)?;
 
   unsafe {
@@ -204,8 +205,8 @@ pub fn op_webgpu_compute_pass_write_timestamp(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePassEndPassArgs {
-  command_encoder_rid: u32,
-  compute_pass_rid: u32,
+  command_encoder_rid: ResourceId,
+  compute_pass_rid: ResourceId,
 }
 
 pub fn op_webgpu_compute_pass_end_pass(
@@ -215,14 +216,14 @@ pub fn op_webgpu_compute_pass_end_pass(
 ) -> Result<Value, AnyError> {
   let command_encoder_resource = state
     .resource_table
-    .get::<super::command_encoder::WebGPUCommandEncoder>(
+    .get::<super::command_encoder::WebGpuCommandEncoder>(
       args.command_encoder_rid,
     )
     .ok_or_else(bad_resource_id)?;
   let command_encoder = command_encoder_resource.0;
   let compute_pass_resource = state
     .resource_table
-    .take::<WebGPUComputePass>(args.compute_pass_rid)
+    .take::<WebGpuComputePass>(args.compute_pass_rid)
     .ok_or_else(bad_resource_id)?;
   let compute_pass = &compute_pass_resource.0.borrow();
   let instance = state.borrow::<super::Instance>();
@@ -234,13 +235,13 @@ pub fn op_webgpu_compute_pass_end_pass(
     ))
     .err();
 
-  Ok(json!({ "err": maybe_err.map(WebGPUError::from) }))
+  Ok(json!({ "err": maybe_err.map(WebGpuError::from) }))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePassSetBindGroupArgs {
-  compute_pass_rid: u32,
+  compute_pass_rid: ResourceId,
   index: u32,
   bind_group: u32,
   dynamic_offsets_data: Option<Vec<u32>>,
@@ -255,11 +256,11 @@ pub fn op_webgpu_compute_pass_set_bind_group(
 ) -> Result<Value, AnyError> {
   let bind_group_resource = state
     .resource_table
-    .get::<super::binding::WebGPUBindGroup>(args.bind_group)
+    .get::<super::binding::WebGpuBindGroup>(args.bind_group)
     .ok_or_else(bad_resource_id)?;
   let compute_pass_resource = state
     .resource_table
-    .get::<WebGPUComputePass>(args.compute_pass_rid)
+    .get::<WebGpuComputePass>(args.compute_pass_rid)
     .ok_or_else(bad_resource_id)?;
 
   unsafe {
@@ -286,7 +287,7 @@ pub fn op_webgpu_compute_pass_set_bind_group(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePassPushDebugGroupArgs {
-  compute_pass_rid: u32,
+  compute_pass_rid: ResourceId,
   group_label: String,
 }
 
@@ -297,7 +298,7 @@ pub fn op_webgpu_compute_pass_push_debug_group(
 ) -> Result<Value, AnyError> {
   let compute_pass_resource = state
     .resource_table
-    .get::<WebGPUComputePass>(args.compute_pass_rid)
+    .get::<WebGpuComputePass>(args.compute_pass_rid)
     .ok_or_else(bad_resource_id)?;
 
   unsafe {
@@ -315,7 +316,7 @@ pub fn op_webgpu_compute_pass_push_debug_group(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePassPopDebugGroupArgs {
-  compute_pass_rid: u32,
+  compute_pass_rid: ResourceId,
 }
 
 pub fn op_webgpu_compute_pass_pop_debug_group(
@@ -325,7 +326,7 @@ pub fn op_webgpu_compute_pass_pop_debug_group(
 ) -> Result<Value, AnyError> {
   let compute_pass_resource = state
     .resource_table
-    .get::<WebGPUComputePass>(args.compute_pass_rid)
+    .get::<WebGpuComputePass>(args.compute_pass_rid)
     .ok_or_else(bad_resource_id)?;
 
   wgpu_core::command::compute_ffi::wgpu_compute_pass_pop_debug_group(
@@ -338,7 +339,7 @@ pub fn op_webgpu_compute_pass_pop_debug_group(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputePassInsertDebugMarkerArgs {
-  compute_pass_rid: u32,
+  compute_pass_rid: ResourceId,
   marker_label: String,
 }
 
@@ -349,7 +350,7 @@ pub fn op_webgpu_compute_pass_insert_debug_marker(
 ) -> Result<Value, AnyError> {
   let compute_pass_resource = state
     .resource_table
-    .get::<WebGPUComputePass>(args.compute_pass_rid)
+    .get::<WebGpuComputePass>(args.compute_pass_rid)
     .ok_or_else(bad_resource_id)?;
 
   unsafe {
