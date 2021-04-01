@@ -398,8 +398,7 @@ where
 
   let defaults = state.borrow::<HttpClientDefaults>();
 
-  let cert_data =
-    get_cert_data(ca_file.as_deref(), ca_data.as_deref())?;
+  let cert_data = get_cert_data(ca_file.as_deref(), ca_data.as_deref())?;
   let client = create_http_client(
     defaults.user_agent.clone(),
     cert_data.or_else(|| defaults.ca_data.clone()),
