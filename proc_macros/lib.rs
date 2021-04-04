@@ -180,18 +180,16 @@ pub fn deno_bindgen(_: TokenStream, item: TokenStream) -> TokenStream {
     }
   };
   let buffer = if zero_copy.is_some() { "buffer" } else { "" };
-  let arguments = format!(
-    "{}",
-    if !args.is_empty() {
-      if zero_copy.is_some() {
-        format!("{}, {}", str_args, buffer)
-      } else {
-        str_args.clone()
-      }
+  let arguments = if !args.is_empty() {
+    if zero_copy.is_some() {
+      format!("{}, {}", str_args, buffer)
     } else {
-      buffer.to_string()
+      str_args.clone()
     }
-  );
+  } else {
+    buffer.to_string()
+  };
+
   let obj_arguments = if args.is_empty() {
     "{}".to_string()
   } else {
@@ -201,14 +199,11 @@ pub fn deno_bindgen(_: TokenStream, item: TokenStream) -> TokenStream {
       format!("{{ {} }}", str_args)
     }
   };
-  let dispatch_arguments = format!(
-    "{}",
-    if zero_copy.is_some() {
-      format!("{}, {}", obj_arguments, buffer)
-    } else {
-      obj_arguments
-    }
-  );
+  let dispatch_arguments = if zero_copy.is_some() {
+    format!("{}, {}", obj_arguments, buffer)
+  } else {
+    obj_arguments
+  };
 
   let mut file = std::fs::OpenOptions::new()
     .append(true)
