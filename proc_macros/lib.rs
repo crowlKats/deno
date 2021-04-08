@@ -24,7 +24,7 @@ fn get_args(func: &ItemFn) -> (Option<PatType>, Vec<PatType>, Option<PatType>) {
             op_state = Some(arg.clone());
           } else if iter.peek().is_none()
             && ((!is_async && name.as_str() == "zero_copy")
-              || (is_async && name.as_str() == "bufs"))
+              || (is_async && name.as_str() == "buf"))
           {
             zero_copy = Some(arg.clone());
           } else {
@@ -89,7 +89,7 @@ pub fn deno_op(_: TokenStream, item: TokenStream) -> TokenStream {
   let mut arg_struct = None;
 
   if args.is_empty() {
-    let arg = quote! { _: Value };
+    let arg = quote! { _: () };
     let arg = arg.into();
     let arg = syn::parse_macro_input!(arg as syn::FnArg);
     func.sig.inputs.push_value(arg);
@@ -118,12 +118,7 @@ pub fn deno_op(_: TokenStream, item: TokenStream) -> TokenStream {
     func.sig.inputs.push_value(FnArg::Typed(zero_copy));
   } else {
     // TODO: maybe full path?
-    let arg = if is_async {
-      quote! { _: BufVec }
-    } else {
-      quote! { _: &mut [ZeroCopyBuf] }
-    };
-
+    let arg = quote! { _: Option<ZeroCopyBuf> };
     let arg = arg.into();
     let arg = syn::parse_macro_input!(arg as syn::FnArg);
     func.sig.inputs.push_value(arg);

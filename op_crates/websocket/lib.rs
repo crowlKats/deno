@@ -1,6 +1,7 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
 use deno_core::error::bad_resource_id;
+use deno_core::error::null_opbuf;
 use deno_core::error::type_error;
 use deno_core::error::AnyError;
 use deno_core::futures::stream::SplitSink;
@@ -12,7 +13,6 @@ use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
 use deno_core::url;
 use deno_core::AsyncRefCell;
-use deno_core::BufVec;
 use deno_core::CancelFuture;
 use deno_core::CancelHandle;
 use deno_core::JsRuntime;
@@ -83,28 +83,22 @@ impl Resource for WsStreamResource {
 
 impl WsStreamResource {}
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CheckPermissionArgs {
-  url: String,
-}
-
 // This op is needed because creating a WS instance in JavaScript is a sync
 // operation and should throw error when permissions are not fulfilled,
 // but actual op that connects WS is async.
 #[deno_op]
 pub fn op_ws_check_permission<WP>(
   state: &mut OpState,
-  args: CheckPermissionArgs,
-) -> Result<Value, AnyError>
+  url: String,
+) -> Result<(), AnyError>
 where
   WP: WebSocketPermissions + 'static,
 {
   state
     .borrow::<WP>()
-    .check_net_url(&url::Url::parse(&args.url)?)?;
+    .check_net_url(&url::Url::parse(&url)?)?;
 
-  Ok(json!({}))
+  Ok(())
 }
 
 #[deno_op]
@@ -213,11 +207,11 @@ pub async fn op_ws_send(
   rid: ResourceId,
   kind: String,
   text: Option<String>,
-  bufs: BufVec,
-) -> Result<Value, AnyError> {
+  buf: Option<ZeroCopyBuf>,
+) -> Result<(), AnyError> {
   let msg = match kind.as_str() {
     "text" => Message::Text(text.unwrap()),
-    "binary" => Message::Binary(bufs[0].to_vec()),
+    "binary" => Message::Binary(buf.ok_or_else(null_opbuf)?.to_vec()),
     "pong" => Message::Pong(vec![]),
     _ => unreachable!(),
   };
@@ -229,7 +223,7 @@ pub async fn op_ws_send(
     .ok_or_else(bad_resource_id)?;
   let mut tx = RcRef::map(&resource, |r| &r.tx).borrow_mut().await;
   tx.send(msg).await?;
-  Ok(json!({}))
+  Ok(())
 }
 
 #[deno_op]
@@ -238,7 +232,7 @@ pub async fn op_ws_close(
   rid: ResourceId,
   code: Option<u16>,
   reason: Option<String>,
-) -> Result<Value, AnyError> {
+) -> Result<(), AnyError> {
   let msg = Message::Close(code.map(|c| CloseFrame {
     code: CloseCode::from(c),
     reason: match reason {
@@ -254,24 +248,18 @@ pub async fn op_ws_close(
     .ok_or_else(bad_resource_id)?;
   let mut tx = RcRef::map(&resource, |r| &r.tx).borrow_mut().await;
   tx.send(msg).await?;
-  Ok(json!({}))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NextEventArgs {
-  rid: ResourceId,
+  Ok(())
 }
 
 #[deno_op]
 pub async fn op_ws_next_event(
   state: Rc<RefCell<OpState>>,
-  args: NextEventArgs,
+  rid: ResourceId,
 ) -> Result<Value, AnyError> {
   let resource = state
     .borrow_mut()
     .resource_table
-    .get::<WsStreamResource>(args.rid)
+    .get::<WsStreamResource>(rid)
     .ok_or_else(bad_resource_id)?;
 
   let mut rx = RcRef::map(&resource, |r| &r.rx).borrow_mut().await;
@@ -307,7 +295,7 @@ pub async fn op_ws_next_event(
     Some(Ok(Message::Pong(_))) => json!({ "kind": "pong" }),
     Some(Err(_)) => json!({ "kind": "error" }),
     None => {
-      state.borrow_mut().resource_table.close(args.rid).unwrap();
+      state.borrow_mut().resource_table.close(rid).unwrap();
       json!({ "kind": "closed" })
     }
   };
