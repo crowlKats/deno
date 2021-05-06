@@ -3,8 +3,11 @@
 use super::analysis::CodeLensSource;
 use super::analysis::ResolvedDependency;
 use super::analysis::ResolvedDependencyErr;
+use super::config;
 use super::language_server;
 use super::language_server::StateSnapshot;
+use super::semantic_tokens::SemanticTokensBuilder;
+use super::semantic_tokens::TsTokenEncodingConsts;
 use super::text;
 use super::text::LineIndex;
 
@@ -17,7 +20,7 @@ use crate::tsc_config::TsConfig;
 use deno_core::error::anyhow;
 use deno_core::error::custom_error;
 use deno_core::error::AnyError;
-use deno_core::json_op_sync;
+use deno_core::op_sync;
 use deno_core::resolve_url;
 use deno_core::serde::de;
 use deno_core::serde::Deserialize;
@@ -30,15 +33,20 @@ use deno_core::JsRuntime;
 use deno_core::ModuleSpecifier;
 use deno_core::OpFn;
 use deno_core::RuntimeOptions;
+use log::warn;
 use lspower::lsp;
 use regex::Captures;
 use regex::Regex;
-use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::thread;
-use text_size::TextSize;
+use std::{borrow::Cow, cmp};
+use std::{collections::HashMap, path::Path};
+use text_size::{TextRange, TextSize};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+
+const FILE_EXTENSION_KIND_MODIFIERS: &[&str] =
+  &[".d.ts", ".ts", ".tsx", ".js", ".jsx", ".json"];
 
 type Request = (
   RequestMethod,
@@ -161,24 +169,20 @@ pub async fn get_asset(
       .request(state_snapshot, RequestMethod::GetAsset(specifier.clone()))
       .await?;
     let maybe_text: Option<String> = serde_json::from_value(res)?;
-    let maybe_asset = if let Some(text) = maybe_text {
-      Some(AssetDocument::new(text))
-    } else {
-      None
-    };
+    let maybe_asset = maybe_text.map(AssetDocument::new);
     Ok(maybe_asset)
   }
 }
 
-fn display_parts_to_string(parts: Vec<SymbolDisplayPart>) -> String {
+fn display_parts_to_string(parts: &[SymbolDisplayPart]) -> String {
   parts
-    .into_iter()
-    .map(|p| p.text)
+    .iter()
+    .map(|p| p.text.to_string())
     .collect::<Vec<String>>()
     .join("")
 }
 
-fn get_tag_body_text(tag: &JSDocTagInfo) -> Option<String> {
+fn get_tag_body_text(tag: &JsDocTagInfo) -> Option<String> {
   tag.text.as_ref().map(|text| match tag.name.as_str() {
     "example" => {
       let caption_regex =
@@ -204,7 +208,7 @@ fn get_tag_body_text(tag: &JSDocTagInfo) -> Option<String> {
   })
 }
 
-fn get_tag_documentation(tag: &JSDocTagInfo) -> String {
+fn get_tag_documentation(tag: &JsDocTagInfo) -> String {
   match tag.name.as_str() {
     "augments" | "extends" | "param" | "template" => {
       if let Some(text) = &tag.text {
@@ -276,7 +280,19 @@ fn replace_links(text: &str) -> String {
     .to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+fn parse_kind_modifier(kind_modifiers: &str) -> HashSet<&str> {
+  let re = Regex::new(r",|\s+").unwrap();
+  re.split(kind_modifiers).collect()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum OneOrMany<T> {
+  One(T),
+  Many(Vec<T>),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ScriptElementKind {
   #[serde(rename = "")]
   Unknown,
@@ -348,42 +364,85 @@ pub enum ScriptElementKind {
   String,
 }
 
+impl Default for ScriptElementKind {
+  fn default() -> Self {
+    Self::Unknown
+  }
+}
+
 impl From<ScriptElementKind> for lsp::CompletionItemKind {
   fn from(kind: ScriptElementKind) -> Self {
-    use lspower::lsp::CompletionItemKind;
-
     match kind {
       ScriptElementKind::PrimitiveType | ScriptElementKind::Keyword => {
-        CompletionItemKind::Keyword
+        lsp::CompletionItemKind::Keyword
       }
-      ScriptElementKind::ConstElement => CompletionItemKind::Constant,
-      ScriptElementKind::LetElement
+      ScriptElementKind::ConstElement
+      | ScriptElementKind::LetElement
       | ScriptElementKind::VariableElement
       | ScriptElementKind::LocalVariableElement
-      | ScriptElementKind::Alias => CompletionItemKind::Variable,
+      | ScriptElementKind::Alias
+      | ScriptElementKind::ParameterElement => {
+        lsp::CompletionItemKind::Variable
+      }
       ScriptElementKind::MemberVariableElement
       | ScriptElementKind::MemberGetAccessorElement
       | ScriptElementKind::MemberSetAccessorElement => {
-        CompletionItemKind::Field
+        lsp::CompletionItemKind::Field
       }
-      ScriptElementKind::FunctionElement => CompletionItemKind::Function,
+      ScriptElementKind::FunctionElement
+      | ScriptElementKind::LocalFunctionElement => {
+        lsp::CompletionItemKind::Function
+      }
       ScriptElementKind::MemberFunctionElement
       | ScriptElementKind::ConstructSignatureElement
       | ScriptElementKind::CallSignatureElement
-      | ScriptElementKind::IndexSignatureElement => CompletionItemKind::Method,
-      ScriptElementKind::EnumElement => CompletionItemKind::Enum,
+      | ScriptElementKind::IndexSignatureElement => {
+        lsp::CompletionItemKind::Method
+      }
+      ScriptElementKind::EnumElement => lsp::CompletionItemKind::Enum,
+      ScriptElementKind::EnumMemberElement => {
+        lsp::CompletionItemKind::EnumMember
+      }
       ScriptElementKind::ModuleElement
-      | ScriptElementKind::ExternalModuleName => CompletionItemKind::Module,
+      | ScriptElementKind::ExternalModuleName => {
+        lsp::CompletionItemKind::Module
+      }
       ScriptElementKind::ClassElement | ScriptElementKind::TypeElement => {
-        CompletionItemKind::Class
+        lsp::CompletionItemKind::Class
       }
-      ScriptElementKind::InterfaceElement => CompletionItemKind::Interface,
-      ScriptElementKind::Warning | ScriptElementKind::ScriptElement => {
-        CompletionItemKind::File
+      ScriptElementKind::InterfaceElement => lsp::CompletionItemKind::Interface,
+      ScriptElementKind::Warning => lsp::CompletionItemKind::Text,
+      ScriptElementKind::ScriptElement => lsp::CompletionItemKind::File,
+      ScriptElementKind::Directory => lsp::CompletionItemKind::Folder,
+      ScriptElementKind::String => lsp::CompletionItemKind::Constant,
+      _ => lsp::CompletionItemKind::Property,
+    }
+  }
+}
+
+impl From<ScriptElementKind> for lsp::SymbolKind {
+  fn from(kind: ScriptElementKind) -> Self {
+    match kind {
+      ScriptElementKind::ModuleElement => lsp::SymbolKind::Module,
+      ScriptElementKind::ClassElement => lsp::SymbolKind::Class,
+      ScriptElementKind::EnumElement => lsp::SymbolKind::Enum,
+      ScriptElementKind::InterfaceElement => lsp::SymbolKind::Interface,
+      ScriptElementKind::MemberFunctionElement => lsp::SymbolKind::Method,
+      ScriptElementKind::MemberVariableElement => lsp::SymbolKind::Property,
+      ScriptElementKind::MemberGetAccessorElement => lsp::SymbolKind::Property,
+      ScriptElementKind::MemberSetAccessorElement => lsp::SymbolKind::Property,
+      ScriptElementKind::VariableElement => lsp::SymbolKind::Variable,
+      ScriptElementKind::ConstElement => lsp::SymbolKind::Variable,
+      ScriptElementKind::LocalVariableElement => lsp::SymbolKind::Variable,
+      ScriptElementKind::FunctionElement => lsp::SymbolKind::Function,
+      ScriptElementKind::LocalFunctionElement => lsp::SymbolKind::Function,
+      ScriptElementKind::ConstructSignatureElement => {
+        lsp::SymbolKind::Constructor
       }
-      ScriptElementKind::Directory => CompletionItemKind::Folder,
-      ScriptElementKind::String => CompletionItemKind::Constant,
-      _ => CompletionItemKind::Property,
+      ScriptElementKind::ConstructorImplementationElement => {
+        lsp::SymbolKind::Constructor
+      }
+      _ => lsp::SymbolKind::Variable,
     }
   }
 }
@@ -413,7 +472,7 @@ pub struct SymbolDisplayPart {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct JSDocTagInfo {
+pub struct JsDocTagInfo {
   name: String,
   text: Option<String>,
 }
@@ -426,22 +485,26 @@ pub struct QuickInfo {
   text_span: TextSpan,
   display_parts: Option<Vec<SymbolDisplayPart>>,
   documentation: Option<Vec<SymbolDisplayPart>>,
-  tags: Option<Vec<JSDocTagInfo>>,
+  tags: Option<Vec<JsDocTagInfo>>,
 }
 
 impl QuickInfo {
   pub fn to_hover(&self, line_index: &LineIndex) -> lsp::Hover {
     let mut contents = Vec::<lsp::MarkedString>::new();
-    if let Some(display_string) =
-      self.display_parts.clone().map(display_parts_to_string)
+    if let Some(display_string) = self
+      .display_parts
+      .clone()
+      .map(|p| display_parts_to_string(&p))
     {
       contents.push(lsp::MarkedString::from_language_code(
         "typescript".to_string(),
         display_string,
       ));
     }
-    if let Some(documentation) =
-      self.documentation.clone().map(display_parts_to_string)
+    if let Some(documentation) = self
+      .documentation
+      .clone()
+      .map(|p| display_parts_to_string(&p))
     {
       contents.push(lsp::MarkedString::from_markdown(documentation));
     }
@@ -506,10 +569,11 @@ impl DocumentSpan {
     let origin_selection_range =
       if let Some(original_context_span) = &self.original_context_span {
         Some(original_context_span.to_range(line_index))
-      } else if let Some(original_text_span) = &self.original_text_span {
-        Some(original_text_span.to_range(line_index))
       } else {
-        None
+        self
+          .original_text_span
+          .as_ref()
+          .map(|original_text_span| original_text_span.to_range(line_index))
       };
     let link = lsp::LocationLink {
       origin_selection_range,
@@ -555,6 +619,90 @@ impl NavigationTree {
         "source": source
       })),
     }
+  }
+
+  pub fn collect_document_symbols(
+    &self,
+    line_index: &LineIndex,
+    document_symbols: &mut Vec<lsp::DocumentSymbol>,
+  ) -> bool {
+    let mut should_include = self.should_include_entry();
+    if !should_include
+      && self.child_items.as_ref().map_or(true, |v| v.is_empty())
+    {
+      return false;
+    }
+
+    let children = self
+      .child_items
+      .as_ref()
+      .map_or(&[] as &[NavigationTree], |v| v.as_slice());
+    for span in self.spans.iter() {
+      let range = TextRange::at(span.start.into(), span.length.into());
+      let mut symbol_children = Vec::<lsp::DocumentSymbol>::new();
+      for child in children.iter() {
+        let should_traverse_child = child
+          .spans
+          .iter()
+          .map(|child_span| {
+            TextRange::at(child_span.start.into(), child_span.length.into())
+          })
+          .any(|child_range| range.intersect(child_range).is_some());
+        if should_traverse_child {
+          let included_child =
+            child.collect_document_symbols(line_index, &mut symbol_children);
+          should_include = should_include || included_child;
+        }
+      }
+
+      if should_include {
+        let mut selection_span = span;
+        if let Some(name_span) = self.name_span.as_ref() {
+          let name_range =
+            TextRange::at(name_span.start.into(), name_span.length.into());
+          if range.contains_range(name_range) {
+            selection_span = name_span;
+          }
+        }
+
+        let mut tags: Option<Vec<lsp::SymbolTag>> = None;
+        let kind_modifiers = parse_kind_modifier(&self.kind_modifiers);
+        if kind_modifiers.contains("deprecated") {
+          tags = Some(vec![lsp::SymbolTag::Deprecated]);
+        }
+
+        let children = if !symbol_children.is_empty() {
+          Some(symbol_children)
+        } else {
+          None
+        };
+
+        // The field `deprecated` is deprecated but DocumentSymbol does not have
+        // a default, therefore we have to supply the deprecated deprecated
+        // field. It is like a bad version of Inception.
+        #[allow(deprecated)]
+        document_symbols.push(lsp::DocumentSymbol {
+          name: self.text.clone(),
+          kind: self.kind.clone().into(),
+          range: span.to_range(line_index),
+          selection_range: selection_span.to_range(line_index),
+          tags,
+          children,
+          detail: None,
+          deprecated: None,
+        })
+      }
+    }
+
+    should_include
+  }
+
+  fn should_include_entry(&self) -> bool {
+    if let ScriptElementKind::Alias = self.kind {
+      return false;
+    }
+
+    !self.text.is_empty() && self.text != "<function>" && self.text != "<class>"
   }
 
   pub fn walk<F>(&self, callback: &F)
@@ -824,6 +972,65 @@ impl FileTextChanges {
   }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Classifications {
+  spans: Vec<u32>,
+}
+
+impl Classifications {
+  pub fn to_semantic_tokens(
+    &self,
+    line_index: &LineIndex,
+  ) -> lsp::SemanticTokens {
+    let token_count = self.spans.len() / 3;
+    let mut builder = SemanticTokensBuilder::new();
+    for i in 0..token_count {
+      let src_offset = 3 * i;
+      let offset = self.spans[src_offset];
+      let length = self.spans[src_offset + 1];
+      let ts_classification = self.spans[src_offset + 2];
+
+      let token_type =
+        Classifications::get_token_type_from_classification(ts_classification);
+      let token_modifiers =
+        Classifications::get_token_modifier_from_classification(
+          ts_classification,
+        );
+
+      let start_pos = line_index.position_tsc(offset.into());
+      let end_pos = line_index.position_tsc(TextSize::from(offset + length));
+
+      // start_pos.line == end_pos.line is always true as there are no multiline tokens
+      builder.push(
+        start_pos.line,
+        start_pos.character,
+        end_pos.character - start_pos.character,
+        token_type,
+        token_modifiers,
+      );
+    }
+    builder.build(None)
+  }
+
+  fn get_token_type_from_classification(ts_classification: u32) -> u32 {
+    (ts_classification >> (TsTokenEncodingConsts::TypeOffset as u32)) - 1
+  }
+
+  fn get_token_modifier_from_classification(ts_classification: u32) -> u32 {
+    ts_classification & (TsTokenEncodingConsts::ModifierMask as u32)
+  }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeAction {
+  description: String,
+  changes: Vec<FileTextChanges>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  commands: Option<Vec<Value>>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeFixAction {
@@ -882,99 +1089,572 @@ impl ReferenceEntry {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompletionInfo {
-  entries: Vec<CompletionEntry>,
-  is_member_completion: bool,
+pub struct CallHierarchyItem {
+  name: String,
+  kind: ScriptElementKind,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  kind_modifiers: Option<String>,
+  file: String,
+  span: TextSpan,
+  selection_span: TextSpan,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  container_name: Option<String>,
 }
 
-impl CompletionInfo {
-  pub fn into_completion_response(
-    self,
+impl CallHierarchyItem {
+  pub(crate) async fn try_resolve_call_hierarchy_item(
+    &self,
+    language_server: &mut language_server::Inner,
+    maybe_root_path: Option<&Path>,
+  ) -> Option<lsp::CallHierarchyItem> {
+    let target_specifier = resolve_url(&self.file).unwrap();
+    let target_line_index = language_server
+      .get_line_index(target_specifier)
+      .await
+      .ok()?;
+
+    Some(self.to_call_hierarchy_item(
+      &target_line_index,
+      language_server,
+      maybe_root_path,
+    ))
+  }
+
+  pub(crate) fn to_call_hierarchy_item(
+    &self,
     line_index: &LineIndex,
-  ) -> lsp::CompletionResponse {
-    let items = self
-      .entries
-      .into_iter()
-      .map(|entry| entry.into_completion_item(line_index))
-      .collect();
-    lsp::CompletionResponse::Array(items)
+    language_server: &mut language_server::Inner,
+    maybe_root_path: Option<&Path>,
+  ) -> lsp::CallHierarchyItem {
+    let target_specifier = resolve_url(&self.file).unwrap();
+    let uri = language_server
+      .url_map
+      .normalize_specifier(&target_specifier)
+      .unwrap();
+
+    let use_file_name = self.is_source_file_item();
+    let maybe_file_path = if uri.scheme() == "file" {
+      uri.to_file_path().ok()
+    } else {
+      None
+    };
+    let name = if use_file_name {
+      if let Some(file_path) = maybe_file_path.as_ref() {
+        file_path.file_name().unwrap().to_string_lossy().to_string()
+      } else {
+        uri.to_string()
+      }
+    } else {
+      self.name.clone()
+    };
+    let detail = if use_file_name {
+      if let Some(file_path) = maybe_file_path.as_ref() {
+        // TODO: update this to work with multi root workspaces
+        let parent_dir = file_path.parent().unwrap();
+        if let Some(root_path) = maybe_root_path {
+          parent_dir
+            .strip_prefix(root_path)
+            .unwrap_or(parent_dir)
+            .to_string_lossy()
+            .to_string()
+        } else {
+          parent_dir.to_string_lossy().to_string()
+        }
+      } else {
+        String::new()
+      }
+    } else {
+      self.container_name.as_ref().cloned().unwrap_or_default()
+    };
+
+    let mut tags: Option<Vec<lsp::SymbolTag>> = None;
+    if let Some(modifiers) = self.kind_modifiers.as_ref() {
+      let kind_modifiers = parse_kind_modifier(modifiers);
+      if kind_modifiers.contains("deprecated") {
+        tags = Some(vec![lsp::SymbolTag::Deprecated]);
+      }
+    }
+
+    lsp::CallHierarchyItem {
+      name,
+      tags,
+      uri,
+      detail: Some(detail),
+      kind: self.kind.clone().into(),
+      range: self.span.to_range(line_index),
+      selection_range: self.selection_span.to_range(line_index),
+      data: None,
+    }
+  }
+
+  fn is_source_file_item(&self) -> bool {
+    self.kind == ScriptElementKind::ScriptElement
+      || self.kind == ScriptElementKind::ModuleElement
+        && self.selection_span.start == 0
   }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompletionEntry {
-  kind: ScriptElementKind,
-  kind_modifiers: Option<String>,
+pub struct CallHierarchyIncomingCall {
+  from: CallHierarchyItem,
+  from_spans: Vec<TextSpan>,
+}
+
+impl CallHierarchyIncomingCall {
+  pub(crate) async fn try_resolve_call_hierarchy_incoming_call(
+    &self,
+    language_server: &mut language_server::Inner,
+    maybe_root_path: Option<&Path>,
+  ) -> Option<lsp::CallHierarchyIncomingCall> {
+    let target_specifier = resolve_url(&self.from.file).unwrap();
+    let target_line_index = language_server
+      .get_line_index(target_specifier)
+      .await
+      .ok()?;
+
+    Some(lsp::CallHierarchyIncomingCall {
+      from: self.from.to_call_hierarchy_item(
+        &target_line_index,
+        language_server,
+        maybe_root_path,
+      ),
+      from_ranges: self
+        .from_spans
+        .iter()
+        .map(|span| span.to_range(&target_line_index))
+        .collect(),
+    })
+  }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallHierarchyOutgoingCall {
+  to: CallHierarchyItem,
+  from_spans: Vec<TextSpan>,
+}
+
+impl CallHierarchyOutgoingCall {
+  pub(crate) async fn try_resolve_call_hierarchy_outgoing_call(
+    &self,
+    line_index: &LineIndex,
+    language_server: &mut language_server::Inner,
+    maybe_root_path: Option<&Path>,
+  ) -> Option<lsp::CallHierarchyOutgoingCall> {
+    let target_specifier = resolve_url(&self.to.file).unwrap();
+    let target_line_index = language_server
+      .get_line_index(target_specifier)
+      .await
+      .ok()?;
+
+    Some(lsp::CallHierarchyOutgoingCall {
+      to: self.to.to_call_hierarchy_item(
+        &target_line_index,
+        language_server,
+        maybe_root_path,
+      ),
+      from_ranges: self
+        .from_spans
+        .iter()
+        .map(|span| span.to_range(&line_index))
+        .collect(),
+    })
+  }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionEntryDetails {
   name: String,
+  kind: ScriptElementKind,
+  kind_modifiers: String,
+  display_parts: Vec<SymbolDisplayPart>,
+  documentation: Option<Vec<SymbolDisplayPart>>,
+  tags: Option<Vec<JsDocTagInfo>>,
+  code_actions: Option<Vec<CodeAction>>,
+  source: Option<Vec<SymbolDisplayPart>>,
+}
+
+impl CompletionEntryDetails {
+  pub fn as_completion_item(
+    &self,
+    original_item: &lsp::CompletionItem,
+  ) -> lsp::CompletionItem {
+    let detail = if original_item.detail.is_some() {
+      original_item.detail.clone()
+    } else if !self.display_parts.is_empty() {
+      Some(replace_links(&display_parts_to_string(&self.display_parts)))
+    } else {
+      None
+    };
+    let documentation = if let Some(parts) = &self.documentation {
+      let mut value = display_parts_to_string(parts);
+      if let Some(tags) = &self.tags {
+        let tag_documentation = tags
+          .iter()
+          .map(get_tag_documentation)
+          .collect::<Vec<String>>()
+          .join("");
+        value = format!("{}\n\n{}", value, tag_documentation);
+      }
+      Some(lsp::Documentation::MarkupContent(lsp::MarkupContent {
+        kind: lsp::MarkupKind::Markdown,
+        value,
+      }))
+    } else {
+      None
+    };
+    // TODO(@kitsonk) add `self.code_actions`
+    // TODO(@kitsonk) add `use_code_snippet`
+
+    lsp::CompletionItem {
+      data: None,
+      detail,
+      documentation,
+      ..original_item.clone()
+    }
+  }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionInfo {
+  entries: Vec<CompletionEntry>,
+  is_global_completion: bool,
+  is_member_completion: bool,
+  is_new_identifier_location: bool,
+  metadata: Option<Value>,
+  optional_replacement_span: Option<TextSpan>,
+}
+
+impl CompletionInfo {
+  pub fn as_completion_response(
+    &self,
+    line_index: &LineIndex,
+    settings: &config::CompletionSettings,
+    specifier: &ModuleSpecifier,
+    position: u32,
+  ) -> lsp::CompletionResponse {
+    let items = self
+      .entries
+      .iter()
+      .map(|entry| {
+        entry
+          .as_completion_item(line_index, self, settings, specifier, position)
+      })
+      .collect();
+    let is_incomplete = self
+      .metadata
+      .clone()
+      .map(|v| {
+        v.as_object()
+          .unwrap()
+          .get("isIncomplete")
+          .unwrap_or(&json!(false))
+          .as_bool()
+          .unwrap()
+      })
+      .unwrap_or(false);
+    lsp::CompletionResponse::List(lsp::CompletionList {
+      is_incomplete,
+      items,
+    })
+  }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionItemData {
+  pub specifier: ModuleSpecifier,
+  pub position: u32,
+  pub name: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub data: Option<Value>,
+  pub use_code_snippet: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionEntry {
+  name: String,
+  kind: ScriptElementKind,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  kind_modifiers: Option<String>,
   sort_text: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
   insert_text: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   replacement_span: Option<TextSpan>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   has_action: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   source: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   is_recommended: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  is_from_unchecked_file: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  data: Option<Value>,
 }
 
 impl CompletionEntry {
-  pub fn into_completion_item(
-    self,
+  fn get_commit_characters(
+    &self,
+    info: &CompletionInfo,
+    settings: &config::CompletionSettings,
+  ) -> Option<Vec<String>> {
+    if info.is_new_identifier_location {
+      return None;
+    }
+
+    let mut commit_characters = vec![];
+    match self.kind {
+      ScriptElementKind::MemberGetAccessorElement
+      | ScriptElementKind::MemberSetAccessorElement
+      | ScriptElementKind::ConstructSignatureElement
+      | ScriptElementKind::CallSignatureElement
+      | ScriptElementKind::IndexSignatureElement
+      | ScriptElementKind::EnumElement
+      | ScriptElementKind::InterfaceElement => {
+        commit_characters.push(".");
+        commit_characters.push(";");
+      }
+      ScriptElementKind::ModuleElement
+      | ScriptElementKind::Alias
+      | ScriptElementKind::ConstElement
+      | ScriptElementKind::LetElement
+      | ScriptElementKind::VariableElement
+      | ScriptElementKind::LocalVariableElement
+      | ScriptElementKind::MemberVariableElement
+      | ScriptElementKind::ClassElement
+      | ScriptElementKind::FunctionElement
+      | ScriptElementKind::MemberFunctionElement
+      | ScriptElementKind::Keyword
+      | ScriptElementKind::ParameterElement => {
+        commit_characters.push(".");
+        commit_characters.push(",");
+        commit_characters.push(";");
+        if !settings.complete_function_calls {
+          commit_characters.push("(");
+        }
+      }
+      _ => (),
+    }
+
+    if commit_characters.is_empty() {
+      None
+    } else {
+      Some(commit_characters.into_iter().map(String::from).collect())
+    }
+  }
+
+  fn get_filter_text(&self) -> Option<String> {
+    // TODO(@kitsonk) this is actually quite a bit more complex.
+    // See `MyCompletionItem.getFilterText` in vscode completion.ts.
+    if self.name.starts_with('#') && self.insert_text.is_none() {
+      return Some(self.name.clone());
+    }
+
+    if let Some(insert_text) = &self.insert_text {
+      if insert_text.starts_with("this.") {
+        return None;
+      }
+      if insert_text.starts_with('[') {
+        let re = Regex::new(r#"^\[['"](.+)['"]\]$"#).unwrap();
+        let insert_text = re.replace(insert_text, ".$1").to_string();
+        return Some(insert_text);
+      }
+    }
+
+    self.insert_text.clone()
+  }
+
+  pub fn as_completion_item(
+    &self,
     line_index: &LineIndex,
+    info: &CompletionInfo,
+    settings: &config::CompletionSettings,
+    specifier: &ModuleSpecifier,
+    position: u32,
   ) -> lsp::CompletionItem {
-    let mut item = lsp::CompletionItem {
-      label: self.name,
-      kind: Some(self.kind.into()),
-      sort_text: Some(self.sort_text.clone()),
-      // TODO(lucacasonato): missing commit_characters
-      ..Default::default()
+    let mut label = self.name.clone();
+    let mut kind: Option<lsp::CompletionItemKind> =
+      Some(self.kind.clone().into());
+
+    let sort_text = if self.source.is_some() {
+      Some(format!("\u{ffff}{}", self.sort_text))
+    } else {
+      Some(self.sort_text.clone())
     };
 
-    if let Some(true) = self.is_recommended {
-      // Make sure isRecommended property always comes first
-      // https://github.com/Microsoft/vscode/issues/40325
-      item.preselect = Some(true);
-    } else if self.source.is_some() {
-      // De-prioritze auto-imports
-      // https://github.com/Microsoft/vscode/issues/40311
-      item.sort_text = Some("\u{ffff}".to_string() + &self.sort_text)
-    }
+    let preselect = self.is_recommended;
+    let use_code_snippet = settings.complete_function_calls
+      && (kind == Some(lsp::CompletionItemKind::Function)
+        || kind == Some(lsp::CompletionItemKind::Method));
+    // TODO(@kitsonk) missing from types: https://github.com/gluon-lang/lsp-types/issues/204
+    let _commit_characters = self.get_commit_characters(info, settings);
+    let mut insert_text = self.insert_text.clone();
+    let range = self.replacement_span.clone();
+    let mut filter_text = self.get_filter_text();
+    let mut tags = None;
+    let mut detail = None;
 
-    match item.kind {
-      Some(lsp::CompletionItemKind::Function)
-      | Some(lsp::CompletionItemKind::Method) => {
-        item.insert_text_format = Some(lsp::InsertTextFormat::Snippet);
-      }
-      _ => {}
-    }
-
-    let mut insert_text = self.insert_text;
-    let replacement_range: Option<lsp::Range> =
-      self.replacement_span.map(|span| span.to_range(line_index));
-
-    // TODO(lucacasonato): port other special cases from https://github.com/theia-ide/typescript-language-server/blob/fdf28313833cd6216d00eb4e04dc7f00f4c04f09/server/src/completion.ts#L49-L55
-
-    if let Some(kind_modifiers) = self.kind_modifiers {
-      if kind_modifiers.contains("\\optional\\") {
+    if let Some(kind_modifiers) = &self.kind_modifiers {
+      let kind_modifiers = parse_kind_modifier(kind_modifiers);
+      if kind_modifiers.contains("optional") {
         if insert_text.is_none() {
-          insert_text = Some(item.label.clone());
+          insert_text = Some(label.clone());
         }
-        if item.filter_text.is_none() {
-          item.filter_text = Some(item.label.clone());
+        if filter_text.is_none() {
+          filter_text = Some(label.clone());
         }
-        item.label += "?";
+        label += "?";
+      }
+      if kind_modifiers.contains("deprecated") {
+        tags = Some(vec![lsp::CompletionItemTag::Deprecated]);
+      }
+      if kind_modifiers.contains("color") {
+        kind = Some(lsp::CompletionItemKind::Color);
+      }
+      if self.kind == ScriptElementKind::ScriptElement {
+        for ext_modifier in FILE_EXTENSION_KIND_MODIFIERS {
+          if kind_modifiers.contains(ext_modifier) {
+            detail = if self.name.to_lowercase().ends_with(ext_modifier) {
+              Some(self.name.clone())
+            } else {
+              Some(format!("{}{}", self.name, ext_modifier))
+            };
+            break;
+          }
+        }
       }
     }
 
-    if let Some(insert_text) = insert_text {
-      if let Some(replacement_range) = replacement_range {
-        item.text_edit = Some(lsp::CompletionTextEdit::Edit(
-          lsp::TextEdit::new(replacement_range, insert_text),
-        ));
+    let text_edit =
+      if let (Some(text_span), Some(new_text)) = (range, &insert_text) {
+        let range = text_span.to_range(line_index);
+        let insert_replace_edit = lsp::InsertReplaceEdit {
+          new_text: new_text.clone(),
+          insert: range,
+          replace: range,
+        };
+        Some(insert_replace_edit.into())
       } else {
-        item.insert_text = Some(insert_text);
+        None
+      };
+
+    let tsc = CompletionItemData {
+      specifier: specifier.clone(),
+      position,
+      name: self.name.clone(),
+      source: self.source.clone(),
+      data: self.data.clone(),
+      use_code_snippet,
+    };
+
+    lsp::CompletionItem {
+      label,
+      kind,
+      sort_text,
+      preselect,
+      text_edit,
+      filter_text,
+      insert_text,
+      detail,
+      tags,
+      data: Some(json!({
+        "tsc": tsc,
+      })),
+      ..Default::default()
+    }
+  }
+}
+
+#[derive(Debug, Deserialize)]
+pub enum OutliningSpanKind {
+  #[serde(rename = "comment")]
+  Comment,
+  #[serde(rename = "region")]
+  Region,
+  #[serde(rename = "code")]
+  Code,
+  #[serde(rename = "imports")]
+  Imports,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutliningSpan {
+  text_span: TextSpan,
+  hint_span: TextSpan,
+  banner_text: String,
+  auto_collapse: bool,
+  kind: OutliningSpanKind,
+}
+
+const FOLD_END_PAIR_CHARACTERS: &[u8] = &[b'}', b']', b')', b'`'];
+
+impl OutliningSpan {
+  pub fn to_folding_range(
+    &self,
+    line_index: &LineIndex,
+    content: &[u8],
+    line_folding_only: bool,
+  ) -> lsp::FoldingRange {
+    let range = self.text_span.to_range(line_index);
+    lsp::FoldingRange {
+      start_line: range.start.line,
+      start_character: if line_folding_only {
+        None
+      } else {
+        Some(range.start.character)
+      },
+      end_line: self.adjust_folding_end_line(
+        &range,
+        line_index,
+        content,
+        line_folding_only,
+      ),
+      end_character: if line_folding_only {
+        None
+      } else {
+        Some(range.end.character)
+      },
+      kind: self.get_folding_range_kind(&self.kind),
+    }
+  }
+
+  fn adjust_folding_end_line(
+    &self,
+    range: &lsp::Range,
+    line_index: &LineIndex,
+    content: &[u8],
+    line_folding_only: bool,
+  ) -> u32 {
+    if line_folding_only && range.end.line > 0 && range.end.character > 0 {
+      let offset_end: usize = line_index.offset(range.end).unwrap().into();
+      let fold_end_char = content[offset_end - 1];
+      if FOLD_END_PAIR_CHARACTERS.contains(&fold_end_char) {
+        return cmp::max(range.end.line - 1, range.start.line);
       }
     }
 
-    item
+    range.end.line
+  }
+
+  fn get_folding_range_kind(
+    &self,
+    span_kind: &OutliningSpanKind,
+  ) -> Option<lsp::FoldingRangeKind> {
+    match span_kind {
+      OutliningSpanKind::Comment => Some(lsp::FoldingRangeKind::Comment),
+      OutliningSpanKind::Region => Some(lsp::FoldingRangeKind::Region),
+      OutliningSpanKind::Imports => Some(lsp::FoldingRangeKind::Imports),
+      _ => None,
+    }
   }
 }
 
@@ -1011,23 +1691,23 @@ pub struct SignatureHelpItem {
   separator_display_parts: Vec<SymbolDisplayPart>,
   parameters: Vec<SignatureHelpParameter>,
   documentation: Vec<SymbolDisplayPart>,
-  tags: Vec<JSDocTagInfo>,
+  tags: Vec<JsDocTagInfo>,
 }
 
 impl SignatureHelpItem {
   pub fn into_signature_information(self) -> lsp::SignatureInformation {
-    let prefix_text = display_parts_to_string(self.prefix_display_parts);
+    let prefix_text = display_parts_to_string(&self.prefix_display_parts);
     let params_text = self
       .parameters
       .iter()
-      .map(|param| display_parts_to_string(param.display_parts.clone()))
+      .map(|param| display_parts_to_string(&param.display_parts))
       .collect::<Vec<String>>()
       .join(", ");
-    let suffix_text = display_parts_to_string(self.suffix_display_parts);
+    let suffix_text = display_parts_to_string(&self.suffix_display_parts);
     lsp::SignatureInformation {
       label: format!("{}{}{}", prefix_text, params_text, suffix_text),
       documentation: Some(lsp::Documentation::String(display_parts_to_string(
-        self.documentation,
+        &self.documentation,
       ))),
       parameters: Some(
         self
@@ -1054,11 +1734,33 @@ impl SignatureHelpParameter {
   pub fn into_parameter_information(self) -> lsp::ParameterInformation {
     lsp::ParameterInformation {
       label: lsp::ParameterLabel::Simple(display_parts_to_string(
-        self.display_parts,
+        &self.display_parts,
       )),
       documentation: Some(lsp::Documentation::String(display_parts_to_string(
-        self.documentation,
+        &self.documentation,
       ))),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionRange {
+  text_span: TextSpan,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  parent: Option<Box<SelectionRange>>,
+}
+
+impl SelectionRange {
+  pub fn to_selection_range(
+    &self,
+    line_index: &LineIndex,
+  ) -> lsp::SelectionRange {
+    lsp::SelectionRange {
+      range: self.text_span.to_range(line_index),
+      parent: self.parent.as_ref().map(|parent_selection| {
+        Box::new(parent_selection.to_selection_range(line_index))
+      }),
     }
   }
 }
@@ -1070,7 +1772,6 @@ struct Response {
 }
 
 struct State<'a> {
-  asset: Option<String>,
   last_id: usize,
   response: Option<Response>,
   state_snapshot: StateSnapshot,
@@ -1080,7 +1781,6 @@ struct State<'a> {
 impl<'a> State<'a> {
   fn new(state_snapshot: StateSnapshot) -> Self {
     Self {
-      asset: None,
       last_id: 1,
       response: None,
       state_snapshot,
@@ -1119,13 +1819,14 @@ fn cache_snapshot(
   Ok(())
 }
 
+// buffer-less json_sync ops
 fn op<F, V, R>(op_fn: F) -> Box<OpFn>
 where
   F: Fn(&mut State, V) -> Result<R, AnyError> + 'static,
   V: de::DeserializeOwned,
-  R: Serialize,
+  R: Serialize + 'static,
 {
-  json_op_sync(move |s, args, _bufs| {
+  op_sync(move |s, args, _bufs| {
     let state = s.borrow_mut::<State>();
     op_fn(state, args)
   })
@@ -1141,7 +1842,7 @@ struct SourceSnapshotArgs {
 /// The language service is dropping a reference to a source file snapshot, and
 /// we can drop our version of that document.
 #[allow(clippy::unnecessary_wraps)]
-fn dispose(
+fn op_dispose(
   state: &mut State,
   args: SourceSnapshotArgs,
 ) -> Result<bool, AnyError> {
@@ -1163,7 +1864,7 @@ struct GetChangeRangeArgs {
 
 /// The language service wants to compare an old snapshot with a new snapshot to
 /// determine what source has changed.
-fn get_change_range(
+fn op_get_change_range(
   state: &mut State,
   args: GetChangeRangeArgs,
 ) -> Result<Value, AnyError> {
@@ -1207,7 +1908,7 @@ fn get_change_range(
   }
 }
 
-fn get_length(
+fn op_get_length(
   state: &mut State,
   args: SourceSnapshotArgs,
 ) -> Result<usize, AnyError> {
@@ -1235,7 +1936,10 @@ struct GetTextArgs {
   end: usize,
 }
 
-fn get_text(state: &mut State, args: GetTextArgs) -> Result<String, AnyError> {
+fn op_get_text(
+  state: &mut State,
+  args: GetTextArgs,
+) -> Result<String, AnyError> {
   let mark = state.state_snapshot.performance.mark("op_get_text");
   let specifier = resolve_url(&args.specifier)?;
   let content =
@@ -1253,7 +1957,7 @@ fn get_text(state: &mut State, args: GetTextArgs) -> Result<String, AnyError> {
   Ok(text::slice(&content, args.start..args.end).to_string())
 }
 
-fn resolve(
+fn op_resolve(
   state: &mut State,
   args: ResolveArgs,
 ) -> Result<Vec<Option<(String, String)>>, AnyError> {
@@ -1344,13 +2048,13 @@ fn resolve(
 }
 
 #[allow(clippy::unnecessary_wraps)]
-fn respond(state: &mut State, args: Response) -> Result<bool, AnyError> {
+fn op_respond(state: &mut State, args: Response) -> Result<bool, AnyError> {
   state.response = Some(args);
   Ok(true)
 }
 
 #[allow(clippy::unnecessary_wraps)]
-fn script_names(
+fn op_script_names(
   state: &mut State,
   _args: Value,
 ) -> Result<Vec<ModuleSpecifier>, AnyError> {
@@ -1371,7 +2075,7 @@ struct ScriptVersionArgs {
   specifier: String,
 }
 
-fn script_version(
+fn op_script_version(
   state: &mut State,
   args: ScriptVersionArgs,
 ) -> Result<Option<String>, AnyError> {
@@ -1398,18 +2102,6 @@ fn script_version(
   Ok(None)
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetAssetArgs {
-  text: Option<String>,
-}
-
-#[allow(clippy::unnecessary_wraps)]
-fn set_asset(state: &mut State, args: SetAssetArgs) -> Result<bool, AnyError> {
-  state.asset = args.text;
-  Ok(true)
-}
-
 /// Create and setup a JsRuntime based on a snapshot. It is expected that the
 /// supplied snapshot is an isolate that contains the TypeScript language
 /// server.
@@ -1425,15 +2117,15 @@ pub fn start(debug: bool) -> Result<JsRuntime, AnyError> {
     op_state.put(State::new(StateSnapshot::default()));
   }
 
-  runtime.register_op("op_dispose", op(dispose));
-  runtime.register_op("op_get_change_range", op(get_change_range));
-  runtime.register_op("op_get_length", op(get_length));
-  runtime.register_op("op_get_text", op(get_text));
-  runtime.register_op("op_resolve", op(resolve));
-  runtime.register_op("op_respond", op(respond));
-  runtime.register_op("op_script_names", op(script_names));
-  runtime.register_op("op_script_version", op(script_version));
-  runtime.register_op("op_set_asset", op(set_asset));
+  runtime.register_op("op_dispose", op(op_dispose));
+  runtime.register_op("op_get_change_range", op(op_get_change_range));
+  runtime.register_op("op_get_length", op(op_get_length));
+  runtime.register_op("op_get_text", op(op_get_text));
+  runtime.register_op("op_resolve", op(op_resolve));
+  runtime.register_op("op_respond", op(op_respond));
+  runtime.register_op("op_script_names", op(op_script_names));
+  runtime.register_op("op_script_version", op(op_script_version));
+  runtime.sync_ops_cache();
 
   let init_config = json!({ "debug": debug });
   let init_src = format!("globalThis.serverInit({});", init_config);
@@ -1477,6 +2169,15 @@ pub enum IncludePackageJsonAutoImports {
   Auto,
   On,
   Off,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetCompletionsAtPositionOptions {
+  #[serde(flatten)]
+  pub user_preferences: UserPreferences,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub trigger_character: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -1542,6 +2243,30 @@ pub struct SignatureHelpTriggerReason {
   pub trigger_character: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetCompletionDetailsArgs {
+  pub specifier: ModuleSpecifier,
+  pub position: u32,
+  pub name: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub data: Option<Value>,
+}
+
+impl From<CompletionItemData> for GetCompletionDetailsArgs {
+  fn from(item_data: CompletionItemData) -> Self {
+    Self {
+      specifier: item_data.specifier,
+      position: item_data.position,
+      name: item_data.name,
+      source: item_data.source,
+      data: item_data.data,
+    }
+  }
+}
+
 /// Methods that are supported by the Language Service in the compiler isolate.
 #[derive(Debug)]
 pub enum RequestMethod {
@@ -1554,7 +2279,9 @@ pub enum RequestMethod {
   /// Retrieve code fixes for a range of a file with the provided error codes.
   GetCodeFixes((ModuleSpecifier, u32, u32, Vec<String>)),
   /// Get completion information at a given position (IntelliSense).
-  GetCompletions((ModuleSpecifier, u32, UserPreferences)),
+  GetCompletions((ModuleSpecifier, u32, GetCompletionsAtPositionOptions)),
+  /// Get details about a specific completion entry.
+  GetCompletionDetails(GetCompletionDetailsArgs),
   /// Retrieve the combined code fixes for a fix id for a module.
   GetCombinedCodeFix((ModuleSpecifier, Value)),
   /// Get declaration information for a specific position.
@@ -1563,18 +2290,30 @@ pub enum RequestMethod {
   GetDiagnostics(Vec<ModuleSpecifier>),
   /// Return document highlights at position.
   GetDocumentHighlights((ModuleSpecifier, u32, Vec<ModuleSpecifier>)),
+  /// Get semantic highlights information for a particular file.
+  GetEncodedSemanticClassifications((ModuleSpecifier, TextSpan)),
   /// Get implementation information for a specific position.
   GetImplementation((ModuleSpecifier, u32)),
   /// Get a "navigation tree" for a specifier.
   GetNavigationTree(ModuleSpecifier),
+  /// Get outlining spans for a specifier.
+  GetOutliningSpans(ModuleSpecifier),
   /// Return quick info at position (hover information).
   GetQuickInfo((ModuleSpecifier, u32)),
   /// Get document references for a specific position.
   GetReferences((ModuleSpecifier, u32)),
   /// Get signature help items for a specific position.
   GetSignatureHelpItems((ModuleSpecifier, u32, SignatureHelpItemsOptions)),
+  /// Get a selection range for a specific position.
+  GetSmartSelectionRange((ModuleSpecifier, u32)),
   /// Get the diagnostic codes that support some form of code fix.
   GetSupportedCodeFixes,
+  /// Resolve a call hierarchy item for a specific position.
+  PrepareCallHierarchy((ModuleSpecifier, u32)),
+  /// Resolve incoming call hierarchy items for a specific position.
+  ProvideCallHierarchyIncomingCalls((ModuleSpecifier, u32)),
+  /// Resolve outgoing call hierarchy items for a specific position.
+  ProvideCallHierarchyOutgoingCalls((ModuleSpecifier, u32)),
 }
 
 impl RequestMethod {
@@ -1626,6 +2365,11 @@ impl RequestMethod {
         "specifier": specifier,
         "fixId": fix_id,
       }),
+      RequestMethod::GetCompletionDetails(args) => json!({
+        "id": id,
+        "method": "getCompletionDetails",
+        "args": args
+      }),
       RequestMethod::GetCompletions((specifier, position, preferences)) => {
         json!({
           "id": id,
@@ -1657,6 +2401,14 @@ impl RequestMethod {
         "position": position,
         "filesToSearch": files_to_search,
       }),
+      RequestMethod::GetEncodedSemanticClassifications((specifier, span)) => {
+        json!({
+          "id": id,
+          "method": "getEncodedSemanticClassifications",
+          "specifier": specifier,
+          "span": span,
+        })
+      }
       RequestMethod::GetImplementation((specifier, position)) => json!({
         "id": id,
         "method": "getImplementation",
@@ -1666,6 +2418,11 @@ impl RequestMethod {
       RequestMethod::GetNavigationTree(specifier) => json!({
         "id": id,
         "method": "getNavigationTree",
+        "specifier": specifier,
+      }),
+      RequestMethod::GetOutliningSpans(specifier) => json!({
+        "id": id,
+        "method": "getOutliningSpans",
         "specifier": specifier,
       }),
       RequestMethod::GetQuickInfo((specifier, position)) => json!({
@@ -1689,10 +2446,48 @@ impl RequestMethod {
           "options": options,
         })
       }
+      RequestMethod::GetSmartSelectionRange((specifier, position)) => {
+        json!({
+          "id": id,
+          "method": "getSmartSelectionRange",
+          "specifier": specifier,
+          "position": position
+        })
+      }
       RequestMethod::GetSupportedCodeFixes => json!({
         "id": id,
         "method": "getSupportedCodeFixes",
       }),
+      RequestMethod::PrepareCallHierarchy((specifier, position)) => {
+        json!({
+          "id": id,
+          "method": "prepareCallHierarchy",
+          "specifier": specifier,
+          "position": position
+        })
+      }
+      RequestMethod::ProvideCallHierarchyIncomingCalls((
+        specifier,
+        position,
+      )) => {
+        json!({
+          "id": id,
+          "method": "provideCallHierarchyIncomingCalls",
+          "specifier": specifier,
+          "position": position
+        })
+      }
+      RequestMethod::ProvideCallHierarchyOutgoingCalls((
+        specifier,
+        position,
+      )) => {
+        json!({
+          "id": id,
+          "method": "provideCallHierarchyOutgoingCalls",
+          "specifier": specifier,
+          "position": position
+        })
+      }
     }
   }
 }
@@ -1738,6 +2533,7 @@ mod tests {
   use crate::lsp::analysis;
   use crate::lsp::documents::DocumentCache;
   use crate::lsp::sources::Sources;
+  use crate::lsp::text::LineIndex;
   use std::path::Path;
   use std::path::PathBuf;
   use tempfile::TempDir;
@@ -1751,12 +2547,16 @@ mod tests {
       let specifier =
         resolve_url(specifier).expect("failed to create specifier");
       documents.open(specifier.clone(), *version, source);
-      if let Some((deps, _)) = analysis::analyze_dependencies(
-        &specifier,
-        source,
-        &MediaType::from(&specifier),
-        &None,
-      ) {
+      let media_type = MediaType::from(&specifier);
+      if let Ok(parsed_module) =
+        analysis::parse_module(&specifier, source, &media_type)
+      {
+        let (deps, _) = analysis::analyze_dependencies(
+          &specifier,
+          &media_type,
+          &parsed_module,
+          &None,
+        );
         documents.set_dependencies(&specifier, Some(deps)).unwrap();
       }
     }
@@ -2225,6 +3025,172 @@ mod tests {
       response,
       json!({
         "file:///a.ts": []
+      })
+    );
+  }
+
+  #[test]
+  fn test_completion_entry_filter_text() {
+    let fixture = CompletionEntry {
+      kind: ScriptElementKind::MemberVariableElement,
+      name: "['foo']".to_string(),
+      insert_text: Some("['foo']".to_string()),
+      ..Default::default()
+    };
+    let actual = fixture.get_filter_text();
+    assert_eq!(actual, Some(".foo".to_string()));
+  }
+
+  #[test]
+  fn test_completions() {
+    let fixture = r#"
+      import { B } from "https://deno.land/x/b/mod.ts";
+
+      const b = new B();
+
+      console.
+    "#;
+    let line_index = LineIndex::new(fixture);
+    let position = line_index
+      .offset_tsc(lsp::Position {
+        line: 5,
+        character: 16,
+      })
+      .unwrap();
+    let (mut runtime, state_snapshot, _) = setup(
+      false,
+      json!({
+        "target": "esnext",
+        "module": "esnext",
+        "lib": ["deno.ns", "deno.window"],
+        "noEmit": true,
+      }),
+      &[("file:///a.ts", fixture, 1)],
+    );
+    let specifier = resolve_url("file:///a.ts").expect("could not resolve url");
+    let result = request(
+      &mut runtime,
+      state_snapshot.clone(),
+      RequestMethod::GetDiagnostics(vec![specifier.clone()]),
+    );
+    assert!(result.is_ok());
+    let result = request(
+      &mut runtime,
+      state_snapshot.clone(),
+      RequestMethod::GetCompletions((
+        specifier.clone(),
+        position,
+        GetCompletionsAtPositionOptions {
+          user_preferences: UserPreferences {
+            include_completions_with_insert_text: Some(true),
+            ..Default::default()
+          },
+          trigger_character: Some(".".to_string()),
+        },
+      )),
+    );
+    assert!(result.is_ok());
+    let response: CompletionInfo =
+      serde_json::from_value(result.unwrap()).unwrap();
+    assert_eq!(response.entries.len(), 19);
+    let result = request(
+      &mut runtime,
+      state_snapshot,
+      RequestMethod::GetCompletionDetails(GetCompletionDetailsArgs {
+        specifier,
+        position,
+        name: "log".to_string(),
+        source: None,
+        data: None,
+      }),
+    );
+    assert!(result.is_ok());
+    let response = result.unwrap();
+    assert_eq!(
+      response,
+      json!({
+        "name": "log",
+        "kindModifiers": "declare",
+        "kind": "method",
+        "displayParts": [
+          {
+            "text": "(",
+            "kind": "punctuation"
+          },
+          {
+            "text": "method",
+            "kind": "text"
+          },
+          {
+            "text": ")",
+            "kind": "punctuation"
+          },
+          {
+            "text": " ",
+            "kind": "space"
+          },
+          {
+            "text": "Console",
+            "kind": "interfaceName"
+          },
+          {
+            "text": ".",
+            "kind": "punctuation"
+          },
+          {
+            "text": "log",
+            "kind": "methodName"
+          },
+          {
+            "text": "(",
+            "kind": "punctuation"
+          },
+          {
+            "text": "...",
+            "kind": "punctuation"
+          },
+          {
+            "text": "data",
+            "kind": "parameterName"
+          },
+          {
+            "text": ":",
+            "kind": "punctuation"
+          },
+          {
+            "text": " ",
+            "kind": "space"
+          },
+          {
+            "text": "any",
+            "kind": "keyword"
+          },
+          {
+            "text": "[",
+            "kind": "punctuation"
+          },
+          {
+            "text": "]",
+            "kind": "punctuation"
+          },
+          {
+            "text": ")",
+            "kind": "punctuation"
+          },
+          {
+            "text": ":",
+            "kind": "punctuation"
+          },
+          {
+            "text": " ",
+            "kind": "space"
+          },
+          {
+            "text": "void",
+            "kind": "keyword"
+          }
+        ],
+        "documentation": []
       })
     );
   }
