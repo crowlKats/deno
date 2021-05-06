@@ -897,8 +897,7 @@ struct LintSubcommand {
     long,
     use_delimiter = true,
     require_equals = true,
-    parse(from_os_str),
-    requires = "unstable"
+    parse(from_os_str)
   )]
   ignore: Vec<PathBuf>,
 
@@ -960,7 +959,6 @@ struct RunSubcommand {
   /// UNSTABLE: Watch for file changes and restart process automatically
   #[clap(
     long,
-    requires = "unstable",
     conflicts_with = "inspect",
     conflicts_with = "inspect-brk",
     long_about = "UNSTABLE: Watch for file changes and restart process automatically.
@@ -1133,7 +1131,6 @@ struct ImportMapArg {
     long,
     alias = "importmap",
     value_name = "FILE",
-    requires = "unstable",
     long_about = "Load import map file from local file or remote URL.
 Docs: https://deno.land/manual/linking_to_external_code/import_maps
 Specification: https://wicg.github.io/import-maps/
@@ -1263,10 +1260,9 @@ struct InspectArgs {
 
 #[derive(Clap, Clone, Debug)]
 struct WatchArg {
-  ///  UNSTABLE: Watch for file changes and restart process automatically
+  /// UNSTABLE: Watch for file changes and restart process automatically
   #[clap(
     long,
-    requires = "unstable",
     long_about = " UNSTABLE: Watch for file changes and restart process automatically.
 Only local files from entry point module graph are watched."
   )]
