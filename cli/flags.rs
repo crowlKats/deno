@@ -94,6 +94,7 @@ pub enum DenoSubcommand {
     script: String,
   },
   Test {
+    doc: bool,
     no_run: bool,
     fail_fast: bool,
     quiet: bool,
@@ -997,6 +998,10 @@ struct TestSubcommand {
   #[clap(long)]
   no_run: bool,
 
+  /// UNSTABLE: type check code blocks
+  #[clap(long)]
+  doc: bool,
+
   /// Stop on first error
   #[clap(long, alias = "failfast")]
   fail_fast: bool,
@@ -1024,6 +1029,17 @@ struct TestSubcommand {
 
   /// List of file names to run
   files: Vec<String>,
+
+  // duplicate arg: conflicts
+  /// UNSTABLE: Watch for file changes and restart process automatically
+  #[clap(
+  long,
+  conflicts_with = "no-run",
+  conflicts_with = "coverage",
+  long_about = " UNSTABLE: Watch for file changes and restart process automatically.
+Only local files from entry point module graph are watched."
+  )]
+  watch: bool,
 
   // duplicate arg: last
   // NOTE: these defaults are provided
@@ -1479,6 +1495,7 @@ fn test_parse(flags: &mut Flags, matches: TestSubcommand, quiet: bool) {
   inspect_args_parse(flags, matches.inspect);
 
   flags.coverage_dir = matches.coverage;
+  flags.watch = matches.watch;
 
   if !matches.script_arg.is_empty() {
     for arg in matches.script_arg {
@@ -1501,6 +1518,7 @@ fn test_parse(flags: &mut Flags, matches: TestSubcommand, quiet: bool) {
 
   flags.subcommand = DenoSubcommand::Test {
     no_run: matches.no_run,
+    doc: matches.doc,
     fail_fast: matches.fail_fast,
     quiet,
     include,
@@ -3050,6 +3068,7 @@ mod tests {
       Flags {
         subcommand: DenoSubcommand::Test {
           no_run: true,
+          doc: false,
           fail_fast: false,
           filter: Some("- foo".to_string()),
           allow_none: true,
