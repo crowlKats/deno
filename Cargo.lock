@@ -824,6 +824,7 @@ dependencies = [
  "deno_core",
  "rusqlite",
  "serde",
+ "tokio",
 ]
 
 [[package]]

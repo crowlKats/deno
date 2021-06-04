@@ -1,9 +1,11 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
+mod indexeddb;
 mod webstorage;
 
 use deno_core::error::AnyError;
 use deno_core::include_js_files;
+use deno_core::op_async;
 use deno_core::op_sync;
 use deno_core::Extension;
 use std::fmt;
@@ -17,8 +19,10 @@ pub fn init(origin_storage_dir: Option<PathBuf>) -> Extension {
     .js(include_js_files!(
       prefix "deno:extensions/webstorage",
       "01_webstorage.js",
+      "02_indexeddb.js",
     ))
     .ops(vec![
+      // webstorage
       (
         "op_webstorage_length",
         op_sync(webstorage::op_webstorage_length),
@@ -37,6 +41,15 @@ pub fn init(origin_storage_dir: Option<PathBuf>) -> Extension {
       (
         "op_webstorage_iterate_keys",
         op_sync(webstorage::op_webstorage_iterate_keys),
+      ),
+      // indexeddb
+      (
+        "op_indexeddb_open_database",
+        op_async(indexeddb::op_indexeddb_open_database),
+      ),
+      (
+        "op_indexeddb_databases",
+        op_async(indexeddb::op_indexeddb_databases),
       ),
     ])
     .state(move |state| {
@@ -106,4 +119,30 @@ pub fn get_not_supported_error_class_name(
 ) -> Option<&'static str> {
   e.downcast_ref::<DomExceptionNotSupportedError>()
     .map(|_| "DOMExceptionNotSupportedError")
+}
+
+#[derive(Debug)]
+pub struct DomExceptionVersionError {
+  pub msg: String,
+}
+
+impl DomExceptionVersionError {
+  pub fn new(msg: &str) -> Self {
+    DomExceptionVersionError {
+      msg: msg.to_string(),
+    }
+  }
+}
+
+impl fmt::Display for DomExceptionVersionError {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    f.pad(&self.msg)
+  }
+}
+
+impl std::error::Error for DomExceptionVersionError {}
+
+pub fn get_version_error_class_name(e: &AnyError) -> Option<&'static str> {
+  e.downcast_ref::<DomExceptionVersionError>()
+    .map(|_| "DOMExceptionVersionError")
 }

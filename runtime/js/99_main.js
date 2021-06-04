@@ -195,7 +195,13 @@ delete Object.prototype.__proto__;
     core.registerErrorBuilder(
       "DOMExceptionNotSupportedError",
       function DOMExceptionNotSupportedError(msg) {
-        return new DOMException(msg, "NotSupported");
+        return new DOMException(msg, "NotSupportedError");
+      },
+    );
+    core.registerErrorBuilder(
+      "DOMExceptionVersionError",
+      function DOMExceptionVersionError(msg) {
+        return new DOMException(msg, "VersionError");
       },
     );
   }
