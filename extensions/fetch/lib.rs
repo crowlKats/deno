@@ -61,6 +61,7 @@ pub fn init<P: FetchPermissions + 'static>(
       prefix "deno:extensions/fetch",
       "01_fetch_util.js",
       "11_streams.js",
+      "12_compression.js",
       "20_headers.js",
       "21_formdata.js",
       "22_body.js",
@@ -75,6 +76,8 @@ pub fn init<P: FetchPermissions + 'static>(
       ("op_fetch_request_write", op_async(op_fetch_request_write)),
       ("op_fetch_response_read", op_async(op_fetch_response_read)),
       ("op_create_http_client", op_sync(op_create_http_client::<P>)),
+      ("op_compress", op_sync(op_compress)),
+      ("op_decompress", op_sync(op_decompress)),
     ])
     .state(move |state| {
       state.put::<reqwest::Client>({
@@ -494,4 +497,48 @@ pub fn create_http_client(
   builder
     .build()
     .map_err(|e| generic_error(format!("Unable to build http client: {}", e)))
+}
+
+pub fn op_compress(
+  _state: &mut OpState,
+  format: String,
+  data: ZeroCopyBuf,
+) -> Result<ZeroCopyBuf, AnyError> {
+  let mut out = vec![];
+
+  match &*format {
+    "gzip" => {
+      let mut enc = flate2::read::GzEncoder::new(data.as_ref(), flate2::Compression::best());
+      enc.read_to_end(&mut out)?;
+    },
+    "deflate" => {
+      let mut enc = flate2::read::DeflateEncoder::new(data.as_ref(), flate2::Compression::best());
+      enc.read_to_end(&mut out)?;
+    }
+    _ => unreachable!(),
+  };
+
+  Ok(out.into())
+}
+
+pub fn op_decompress(
+  _state: &mut OpState,
+  format: String,
+  data: ZeroCopyBuf,
+) -> Result<ZeroCopyBuf, AnyError> {
+  let mut out = vec![];
+
+  match &*format {
+    "gzip" => {
+      let mut enc = flate2::read::GzDecoder::new(data.as_ref());
+      enc.read_to_end(&mut out)?;
+    },
+    "deflate" => {
+      let mut enc = flate2::read::DeflateDecoder::new(data.as_ref());
+      enc.read_to_end(&mut out)?;
+    }
+    _ => unreachable!(),
+  };
+
+  Ok(out.into())
 }

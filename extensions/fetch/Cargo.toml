@@ -24,3 +24,4 @@ serde = { version = "1.0.125", features = ["derive"] }
 tokio = { version = "1.6.1", features = ["full"] }
 tokio-stream = "0.1.5"
 tokio-util = "0.6.7"
+flate2 = "1.0.20"

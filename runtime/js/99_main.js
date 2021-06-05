@@ -25,6 +25,7 @@ delete Object.prototype.__proto__;
   const url = window.__bootstrap.url;
   const headers = window.__bootstrap.headers;
   const streams = window.__bootstrap.streams;
+  const compression = window.__bootstrap.compression;
   const fileReader = window.__bootstrap.fileReader;
   const webgpu = window.__bootstrap.webgpu;
   const webSocket = window.__bootstrap.webSocket;
@@ -252,11 +253,13 @@ delete Object.prototype.__proto__;
     ByteLengthQueuingStrategy: util.nonEnumerable(
       streams.ByteLengthQueuingStrategy,
     ),
+    CompressionStream: util.nonEnumerable(compression.CompressionStream),
     CloseEvent: util.nonEnumerable(CloseEvent),
     CountQueuingStrategy: util.nonEnumerable(
       streams.CountQueuingStrategy,
     ),
     CustomEvent: util.nonEnumerable(CustomEvent),
+    DecompressionStream: util.nonEnumerable(compression.DecompressionStream),
     DOMException: util.nonEnumerable(DOMException),
     ErrorEvent: util.nonEnumerable(ErrorEvent),
     Event: util.nonEnumerable(Event),

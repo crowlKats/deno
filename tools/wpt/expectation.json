@@ -1274,5 +1274,35 @@
       "set-blob.any.html": true,
       "set.any.html": true
     }
+  },
+  "compression": {
+    "compression-bad-chunks.tentative.any.html": false,
+    "compression-including-empty-chunk.tentative.any.html": false,
+    "compression-multiple-chunks.tentative.any.html": false,
+    "compression-output-length.tentative.any.html": false,
+    "compression-stream.tentative.any.html": [
+      "deflated empty data should be reinflated back to its origin",
+      "deflated small amount data should be reinflated back to its origin",
+      "deflated large amount data should be reinflated back to its origin",
+      "gzipped empty data should be reinflated back to its origin",
+      "gzipped small amount data should be reinflated back to its origin",
+      "gzipped large amount data should be reinflated back to its origin"
+    ],
+    "compression-with-detach.tentative.window.html": false,
+    "decompression-bad-chunks.tentative.any.html": false,
+    "decompression-buffersource.tentative.any.html": false,
+    "decompression-constructor-error.tentative.any.html": true,
+    "decompression-correct-input.tentative.any.html": false,
+    "decompression-corrupt-input.tentative.any.html": false,
+    "decompression-empty-input.tentative.any.html": false,
+    "decompression-split-chunk.tentative.any.html": false,
+    "decompression-uint8array-output.tentative.any.html": false,
+    "decompression-with-detach.tentative.window.html": false,
+    "idlharness.https.any.html": [
+      "CompressionStream must be primary interface of new CompressionStream(\"deflate\")",
+      "Stringification of new CompressionStream(\"deflate\")",
+      "DecompressionStream must be primary interface of new DecompressionStream(\"deflate\")",
+      "Stringification of new DecompressionStream(\"deflate\")"
+    ]
   }
 }
