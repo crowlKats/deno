@@ -40,7 +40,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::convert::From;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, BufRead, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -76,8 +76,9 @@ pub fn init<P: FetchPermissions + 'static>(
       ("op_fetch_request_write", op_async(op_fetch_request_write)),
       ("op_fetch_response_read", op_async(op_fetch_response_read)),
       ("op_create_http_client", op_sync(op_create_http_client::<P>)),
+      ("op_create_compressor", op_sync(op_create_compressor)),
+      ("op_create_decompressor", op_sync(op_create_decompressor)),
       ("op_compress", op_sync(op_compress)),
-      ("op_decompress", op_sync(op_decompress)),
     ])
     .state(move |state| {
       state.put::<reqwest::Client>({
@@ -499,46 +500,96 @@ pub fn create_http_client(
     .map_err(|e| generic_error(format!("Unable to build http client: {}", e)))
 }
 
+struct CompressionContext(Encs<'_>);
+
+enum Encs<'a> {
+  GzipEnc(flate2::bufread::GzEncoder<&'a [u8]>),
+  DeflateEnc(flate2::bufread::DeflateEncoder<&'a [u8]>),
+  GzipDec(flate2::bufread::GzDecoder<&'a [u8]>),
+  DeflateDec(flate2::bufread::DeflateDecoder<&'a [u8]>),
+}
+
+impl Resource for CompressionContext {
+  fn name(&self) -> Cow<str> {
+    "compressionContext".into()
+  }
+}
+
+
+pub fn op_create_compressor(
+  state: &mut OpState,
+  format: String,
+  _: (),
+) -> Result<ResourceId, AnyError> {
+  let enc = match &*format {
+    "gzip" => {
+      Encs::GzipEnc(flate2::bufread::GzEncoder::new(&[], flate2::Compression::best()))
+    }
+    "deflate" => {
+      Encs::DeflateEnc(flate2::bufread::DeflateEncoder::new(&vec![], flate2::Compression::best()))
+    }
+    _ => unreachable!(),
+  };
+
+  let rid = state.resource_table.add(CompressionContext(enc));
+
+  Ok(rid)
+}
+
+pub fn op_create_decompressor(
+  state: &mut OpState,
+  format: String,
+  _: (),
+) -> Result<ResourceId, AnyError> {
+  let dec: Encs = match &*format {
+    "gzip" => {
+      Encs::GzipDec(flate2::bufread::GzDecoder::new(&vec![]))
+    }
+    "deflate" => {
+      Encs::DeflateDec(flate2::bufread::DeflateDecoder::new(&vec![]))
+    }
+    _ => unreachable!(),
+  };
+
+  let rid = state.resource_table.add(CompressionContext(dec));
+
+  Ok(rid)
+}
+
 pub fn op_compress(
-  _state: &mut OpState,
-  format: String,
+  state: &mut OpState,
+  rid: ResourceId,
   data: ZeroCopyBuf,
 ) -> Result<ZeroCopyBuf, AnyError> {
+  let resource = state.resource_table.get::<CompressionContext>(rid).ok_or_else(bad_resource_id)?;
+  let mut context = &resource.0;
+
   let mut out = vec![];
 
-  match &*format {
-    "gzip" => {
-      let mut enc = flate2::read::GzEncoder::new(data.as_ref(), flate2::Compression::best());
-      enc.read_to_end(&mut out)?;
+  match context {
+    Encs::GzipEnc(mut c) => {
+        c.write_all(data.as_ref());
+  c.read_to_end(&mut out)?;
+
     },
-    "deflate" => {
-      let mut enc = flate2::read::DeflateEncoder::new(data.as_ref(), flate2::Compression::best());
-      enc.read_to_end(&mut out)?;
-    }
-    _ => unreachable!(),
+    Encs::DeflateEnc(mut c) => {
+        c.write_all(data.as_ref());
+  c.read_to_end(&mut out)?;
+
+    },
+    Encs::GzipDec(mut c) => {
+        c.write_all(data.as_ref());
+  c.read_to_end(&mut out)?;
+
+    },
+    Encs::DeflateDec(mut c) => {
+        c.write_all(data.as_ref());
+  c.read_to_end(&mut out)?;
+
+    },
   };
+
 
   Ok(out.into())
 }
 
-pub fn op_decompress(
-  _state: &mut OpState,
-  format: String,
-  data: ZeroCopyBuf,
-) -> Result<ZeroCopyBuf, AnyError> {
-  let mut out = vec![];
-
-  match &*format {
-    "gzip" => {
-      let mut enc = flate2::read::GzDecoder::new(data.as_ref());
-      enc.read_to_end(&mut out)?;
-    },
-    "deflate" => {
-      let mut enc = flate2::read::DeflateDecoder::new(data.as_ref());
-      enc.read_to_end(&mut out)?;
-    }
-    _ => unreachable!(),
-  };
-
-  Ok(out.into())
-}

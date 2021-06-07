@@ -19,14 +19,16 @@
         context: "Argument 1",
       });
 
-      if (format !== "deflate" || format !== "gzip") {
+      if (format !== "deflate" && format !== "gzip") {
         throw new TypeError(`Format '${format}' not supported`);
       }
+
+      const rid = core.opSync("op_create_compressor", format);
 
       this[_stream] = new TransformStream({
         transform(chunk, controller) {
           chunk = webidl.converters.BufferSource(chunk);
-          const buffer = core.opSync("op_compress", format, chunk);
+          const buffer = core.opSync("op_compress", rid, new Uint8Array(chunk));
           if (buffer.length === 0) {
             return;
           }
@@ -34,7 +36,7 @@
         },
         flush(controller) {
           // TODO
-        }
+        },
       });
     }
 
@@ -44,6 +46,15 @@
 
     get writable() {
       return this[_stream].writable;
+    }
+
+    [Symbol.for("Deno.customInspect")](inspect) {
+      return `${this.constructor.name} ${
+        inspect({
+          readable: this.readable,
+          writable: this.writable,
+        })
+      }`;
     }
   }
 
@@ -58,14 +69,16 @@
         context: "Argument 1",
       });
 
-      if (format !== "deflate" || format !== "gzip") {
+      if (format !== "deflate" && format !== "gzip") {
         throw new TypeError(`Format '${format}' not supported`);
       }
+
+      const rid = core.opSync("op_create_decompressor", format);
 
       this[_stream] = new TransformStream({
         transform(chunk, controller) {
           chunk = webidl.converters.BufferSource(chunk);
-          const buffer = core.opSync("op_decompress", format, chunk);
+          const buffer = core.opSync("op_compress", rid, new Uint8Array(chunk));
           if (buffer.length === 0) {
             return;
           }
@@ -73,7 +86,7 @@
         },
         flush(controller) {
           // TODO
-        }
+        },
       });
     }
 
@@ -84,10 +97,19 @@
     get writable() {
       return this[_stream].writable;
     }
+
+    [Symbol.for("Deno.customInspect")](inspect) {
+      return `${this.constructor.name} ${
+        inspect({
+          readable: this.readable,
+          writable: this.writable,
+        })
+      }`;
+    }
   }
 
   window.__bootstrap.compression = {
     CompressionStream,
     DecompressionStream,
-  }
-  })(this);
+  };
+})(this);
