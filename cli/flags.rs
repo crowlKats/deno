@@ -762,6 +762,11 @@ struct InfoSubcommand {
   #[clap(flatten)]
   import_map: ImportMapArg,
 
+  // Duplicate arg: runtime
+  /// Show files used for origin bound APIs like the Web Storage API when running a script with '--location=<HREF>'
+  #[clap(long, value_name = "HREF", validator = location_arg_validate, conflicts_with = "file")]
+  location: Option<Url>,
+
   #[clap(flatten)]
   ca_file: CaFileArg,
 
@@ -856,9 +861,9 @@ https://deno.land/manual/getting_started/setup_your_environment#editors-and-ides
 )]
 struct LspSubcommand {}
 
-/// UNSTABLE: Lint source files
+/// Lint source files
 #[derive(Clap, Clone, Debug)]
-#[clap(long_about = "UNSTABLE: Lint JavaScript/TypeScript source code.
+#[clap(long_about = "Lint JavaScript/TypeScript source code.
 
   deno lint
   deno lint myfile1.ts myfile2.js
@@ -1419,6 +1424,7 @@ fn fmt_parse(flags: &mut Flags, matches: FmtSubcommand) {
 fn info_parse(flags: &mut Flags, matches: InfoSubcommand) {
   reload_arg_parse(flags, matches.reload);
   import_map_arg_parse(flags, matches.import_map);
+  flags.location = matches.location;
   ca_file_arg_parse(flags, matches.ca_file);
 
   flags.subcommand = DenoSubcommand::Info {
