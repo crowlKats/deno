@@ -957,3 +957,35 @@ pub fn op_indexeddb_object_store_get_records(
 
   Ok(res)
 }
+
+// Ref: https://w3c.github.io/IndexedDB/#iterate-a-cursor
+#[op]
+pub fn op_indexeddb_index_get_records(
+  state: &mut OpState,
+  database_name: String,
+  store_name: String,
+  index_name: String,
+) -> Result<Vec<(Key, Vec<u8>)>, AnyError> {
+  let conn = &state.borrow::<IndexedDbManager>().0;
+
+  let mut stmt = conn.prepare_cached(
+    "SELECT id FROM object_store WHERE name = ? AND database_name = ?",
+  )?;
+  let object_store_id: u64 =
+    stmt.query_row(params![store_name, database_name], |row| row.get(0))?;
+
+  let mut stmt = conn.prepare_cached(
+    "SELECT id FROM index WHERE name = ? AND object_store_id = ?",
+  )?;
+  let index_id: u64 =
+    stmt.query_row(params![index_name, object_store_id], |row| row.get(0))?;
+
+  let res = stmt
+    .query_map(params![object_store_id], |row| {
+      Ok((row.get::<usize, Key>(0)?, row.get::<usize, Vec<u8>>(1)?))
+    })?
+    .collect::<Result<_, rusqlite::Error>>()?;
+
+  todo!();
+  Ok(res)
+}

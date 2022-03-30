@@ -891,7 +891,6 @@
 
   const _name = Symbol("[[name]]");
   const _version = Symbol("[[version]]");
-  const _objectStores = Symbol("[[objectStores]]");
   const _upgradeTransaction = Symbol("[[upgradeTransaction]]");
   const _db = Symbol("[[db]]");
   const _closePending = Symbol("[[closePending]]");
@@ -901,8 +900,6 @@
   // Ref: https://w3c.github.io/IndexedDB/#idbdatabase
   // TODO: finalizationRegistry: If an IDBDatabase object is garbage collected, the associated connection must be closed.
   class IDBDatabase extends EventTarget {
-    /** @type {Set<ObjectStore>} */
-    [_objectStores] = new Set();
     /** @type {(IDBTransaction | null)} */
     [_upgradeTransaction] = null;
     /** @type {Database} */
