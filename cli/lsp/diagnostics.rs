@@ -26,6 +26,7 @@ use deno_core::ModuleSpecifier;
 use deno_graph::Resolved;
 use deno_runtime::tokio_util::create_basic_runtime;
 use log::error;
+use lsp_types::Diagnostic;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
@@ -742,6 +743,52 @@ impl DenoDiagnostic {
                 }],
               )])),
               ..Default::default()
+            }),
+            ..Default::default()
+          }
+        }
+        _ => {
+          return Err(anyhow!(
+            "Unsupported diagnostic code (\"{}\") provided.",
+            code
+          ))
+        }
+      };
+      Ok(code_action)
+    } else {
+      Err(anyhow!("Unsupported diagnostic code provided."))
+    }
+  }
+
+  /// A "static" method which for diagnostics that originated from the
+  /// structure return a code action which can resolve the diagnostics.
+  /// Diagnostics need to be of the same grouping.
+  pub fn get_code_action_from_multiple(
+    _specifier: &ModuleSpecifier,
+    diagnostics: Vec<&&lsp::Diagnostic>,
+  ) -> Result<lsp::CodeAction, AnyError> {
+    if let Some(lsp::NumberOrString::String(code)) = &diagnostics[0].code {
+      let code_action = match code.as_str() {
+        "no-cache" | "no-cache-data" | "no-cache-npm" => {
+          let data = diagnostics[0]
+            .data
+            .clone()
+            .ok_or_else(|| anyhow!("Diagnostic is missing data"))?;
+          let data: DiagnosticDataSpecifier = serde_json::from_value(data)?;
+
+          let diagnostics = diagnostics
+            .into_iter()
+            .map(|diagnostic| (*diagnostic).clone())
+            .collect::<Vec<Diagnostic>>();
+
+          lsp::CodeAction {
+            title: "Cache all dependencies.".to_string(),
+            kind: Some(lsp::CodeActionKind::QUICKFIX),
+            diagnostics: Some(diagnostics),
+            command: Some(lsp::Command {
+              title: "".to_string(),
+              command: "deno.cache".to_string(),
+              arguments: Some(vec![json!([data.specifier])]),
             }),
             ..Default::default()
           }

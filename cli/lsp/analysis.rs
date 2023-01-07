@@ -379,6 +379,17 @@ impl CodeActionCollection {
     Ok(())
   }
 
+  pub fn add_deno_fix_multiple_action(
+    &mut self,
+    specifier: &ModuleSpecifier,
+    diagnostics: Vec<&&lsp::Diagnostic>,
+  ) -> Result<(), AnyError> {
+    let code_action =
+      DenoDiagnostic::get_code_action_from_multiple(specifier, diagnostics)?;
+    self.actions.push(CodeActionKind::Deno(code_action));
+    Ok(())
+  }
+
   pub fn add_deno_lint_ignore_action(
     &mut self,
     specifier: &ModuleSpecifier,

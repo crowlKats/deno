@@ -1380,6 +1380,33 @@ impl Inner {
       let file_diagnostics = self
         .diagnostics_server
         .get_ts_diagnostics(&specifier, asset_or_doc.document_lsp_version());
+
+      let cache_diagnostics = fixable_diagnostics
+        .iter()
+        .filter(|diagnostic| match diagnostic.source.as_deref() {
+          Some("deno") => {
+            if let Some(NumberOrString::String(code)) = &diagnostic.code {
+              matches!(
+                code.as_str(),
+                "no-cache" | "no-cache-data" | "no-cache-npm"
+              )
+            } else {
+              false
+            }
+          }
+          _ => false,
+        })
+        .collect::<Vec<_>>();
+
+      if cache_diagnostics.len() > 1 {
+        code_actions
+          .add_deno_fix_multiple_action(&specifier, cache_diagnostics)
+          .map_err(|err| {
+            error!("{}", err);
+            LspError::internal_error()
+          })?;
+      }
+
       for diagnostic in &fixable_diagnostics {
         match diagnostic.source.as_deref() {
           Some("deno-ts") => {
@@ -1444,6 +1471,8 @@ impl Inner {
         }
       }
       code_actions.set_preferred_fixes();
+      lsp_log!("------------- {:#?}", code_actions);
+
       all_actions.extend(code_actions.get_response());
     }
 
