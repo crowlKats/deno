@@ -554,6 +554,14 @@ static NPM_PROCESS_STATE: Lazy<Option<NpmProcessState>> = Lazy::new(|| {
   Some(state)
 });
 
+static PERMISSION_AUDIT_LOG: Lazy<Option<PathBuf>> = Lazy::new(|| {
+  if let Ok(path) = env::var("DENO_AUDIT_LOG") {
+    Some(PathBuf::from(path))
+  } else {
+    None
+  }
+});
+
 /// Overrides for the options below that when set will
 /// use these values over the values derived from the
 /// CLI flags or config file.
@@ -720,6 +728,10 @@ impl CliOptions {
     }
 
     None
+  }
+
+  pub fn get_audit_log_path(&self) -> Option<&PathBuf> {
+    PERMISSION_AUDIT_LOG.as_ref()
   }
 
   // If the main module should be treated as being in an npm package.

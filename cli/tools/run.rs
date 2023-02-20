@@ -56,9 +56,10 @@ To grant permissions, set them before the script argument. For example:
   } else {
     resolve_url_or_path(&run_flags.script)?
   };
-  let permissions = PermissionsContainer::new(Permissions::from_options(
-    &ps.options.permissions_options(),
-  )?);
+  let permissions = PermissionsContainer::new_with_maybe_audit_log(
+    Permissions::from_options(&ps.options.permissions_options())?,
+    ps.options.get_audit_log_path(),
+  );
   let mut worker = create_main_worker(&ps, main_module, permissions).await?;
 
   let exit_code = worker.run().await?;

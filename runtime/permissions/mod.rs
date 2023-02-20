@@ -19,11 +19,15 @@ use log;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::fmt;
+use std::fs::File;
 use std::hash::Hash;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::string::ToString;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 mod prompter;
@@ -37,6 +41,11 @@ pub use prompter::PromptCallback;
 static DEBUG_LOG_ENABLED: Lazy<bool> =
   Lazy::new(|| log::log_enabled!(log::Level::Debug));
 
+static AUDIT_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+static AUDIT_LOG_FILE: Lazy<Arc<Mutex<Option<File>>>> =
+  Lazy::new(|| Arc::new(Mutex::new(None)));
+
 /// Tri-state value for storing permission state
 #[derive(Eq, PartialEq, Debug, Clone, Copy, Deserialize, PartialOrd)]
 pub enum PermissionState {
@@ -48,17 +57,22 @@ pub enum PermissionState {
 impl PermissionState {
   #[inline(always)]
   fn log_perm_access(name: &str, info: impl FnOnce() -> Option<String>) {
+    let fmt_access = Self::fmt_access(name, info);
+
+    if AUDIT_LOG_ENABLED.load(Ordering::Relaxed) {
+      let mut lock = AUDIT_LOG_FILE.lock();
+      let file = lock.as_mut().unwrap();
+      file.write_all(fmt_access.as_bytes()).unwrap();
+      file.write_all("\n".as_bytes()).unwrap();
+    }
+
     // Eliminates log overhead (when logging is disabled),
     // log_enabled!(Debug) check in a hot path still has overhead
     // TODO(AaronO): generalize or upstream this optimization
     if *DEBUG_LOG_ENABLED {
       log::debug!(
         "{}",
-        colors::bold(&format!(
-          "{}️  Granted {}",
-          PERMISSION_EMOJI,
-          Self::fmt_access(name, info)
-        ))
+        colors::bold(&format!("{}️  Granted {}", PERMISSION_EMOJI, fmt_access))
       );
     }
   }
@@ -1627,6 +1641,25 @@ pub struct PermissionsContainer(pub Arc<Mutex<Permissions>>);
 
 impl PermissionsContainer {
   pub fn new(perms: Permissions) -> Self {
+    Self(Arc::new(Mutex::new(perms)))
+  }
+
+  pub fn new_with_maybe_audit_log(
+    perms: Permissions,
+    path: Option<&PathBuf>,
+  ) -> Self {
+    if let Some(path) = path {
+      let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(path)
+        .unwrap();
+
+      let mut mutex = AUDIT_LOG_FILE.lock();
+      *mutex = Some(file);
+
+      AUDIT_LOG_ENABLED.store(true, Ordering::Relaxed);
+    }
     Self(Arc::new(Mutex::new(perms)))
   }
 
