@@ -132,7 +132,7 @@ pub fn op_webgpu_render_pass_begin_pipeline_statistics_query(
 
   wgpu_core::command::render_ffi::wgpu_render_pass_begin_pipeline_statistics_query(
         &mut render_pass_resource.0.borrow_mut(),
-        query_set_resource.0,
+        query_set_resource.1,
         query_index,
     );
 
@@ -171,7 +171,7 @@ pub fn op_webgpu_render_pass_write_timestamp(
 
   wgpu_core::command::render_ffi::wgpu_render_pass_write_timestamp(
     &mut render_pass_resource.0.borrow_mut(),
-    query_set_resource.0,
+    query_set_resource.1,
     query_index,
   );
 
@@ -191,7 +191,7 @@ pub fn op_webgpu_render_pass_execute_bundles(
         state
           .resource_table
           .get::<super::bundle::WebGpuRenderBundle>(*rid)?;
-      Ok(render_bundle_resource.0)
+      Ok(render_bundle_resource.1)
     })
     .collect::<Result<Vec<_>, AnyError>>()?;
 
@@ -223,7 +223,7 @@ pub fn op_webgpu_render_pass_end(
     .get::<super::command_encoder::WebGpuCommandEncoder>(
     command_encoder_rid,
   )?;
-  let command_encoder = command_encoder_resource.0;
+  let command_encoder = command_encoder_resource.1;
   let render_pass_resource = state
     .resource_table
     .take::<WebGpuRenderPass>(render_pass_rid)?;
@@ -275,7 +275,7 @@ pub fn op_webgpu_render_pass_set_bind_group(
     wgpu_core::command::render_ffi::wgpu_render_pass_set_bind_group(
       &mut render_pass_resource.0.borrow_mut(),
       index,
-      bind_group_resource.0,
+      bind_group_resource.1,
       dynamic_offsets_data.as_ptr(),
       dynamic_offsets_data.len(),
     );
@@ -364,7 +364,7 @@ pub fn op_webgpu_render_pass_set_pipeline(
 
   wgpu_core::command::render_ffi::wgpu_render_pass_set_pipeline(
     &mut render_pass_resource.0.borrow_mut(),
-    render_pipeline_resource.0,
+    render_pipeline_resource.1,
   );
 
   Ok(WebGpuResult::empty())
@@ -396,7 +396,7 @@ pub fn op_webgpu_render_pass_set_index_buffer(
   };
 
   render_pass_resource.0.borrow_mut().set_index_buffer(
-    buffer_resource.0,
+    buffer_resource.1,
     index_format,
     offset,
     size,
@@ -433,7 +433,7 @@ pub fn op_webgpu_render_pass_set_vertex_buffer(
   wgpu_core::command::render_ffi::wgpu_render_pass_set_vertex_buffer(
     &mut render_pass_resource.0.borrow_mut(),
     slot,
-    buffer_resource.0,
+    buffer_resource.1,
     offset,
     size,
   );
@@ -507,7 +507,7 @@ pub fn op_webgpu_render_pass_draw_indirect(
 
   wgpu_core::command::render_ffi::wgpu_render_pass_draw_indirect(
     &mut render_pass_resource.0.borrow_mut(),
-    buffer_resource.0,
+    buffer_resource.1,
     indirect_offset,
   );
 
@@ -530,7 +530,7 @@ pub fn op_webgpu_render_pass_draw_indexed_indirect(
 
   wgpu_core::command::render_ffi::wgpu_render_pass_draw_indexed_indirect(
     &mut render_pass_resource.0.borrow_mut(),
-    buffer_resource.0,
+    buffer_resource.1,
     indirect_offset,
   );
 

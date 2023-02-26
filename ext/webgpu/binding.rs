@@ -7,22 +7,37 @@ use deno_core::Resource;
 use deno_core::ResourceId;
 use serde::Deserialize;
 use std::borrow::Cow;
+use std::rc::Rc;
 
 use super::error::WebGpuResult;
 
 pub(crate) struct WebGpuBindGroupLayout(
+  pub(crate) crate::Instance,
   pub(crate) wgpu_core::id::BindGroupLayoutId,
 );
 impl Resource for WebGpuBindGroupLayout {
   fn name(&self) -> Cow<str> {
     "webGPUBindGroupLayout".into()
   }
+
+  fn close(self: Rc<Self>) {
+    let instance = &self.0;
+    gfx_select!(self.1 => instance.bind_group_layout_drop(self.1));
+  }
 }
 
-pub(crate) struct WebGpuBindGroup(pub(crate) wgpu_core::id::BindGroupId);
+pub(crate) struct WebGpuBindGroup(
+  pub(crate) crate::Instance,
+  pub(crate) wgpu_core::id::BindGroupId,
+);
 impl Resource for WebGpuBindGroup {
   fn name(&self) -> Cow<str> {
     "webGPUBindGroup".into()
+  }
+
+  fn close(self: Rc<Self>) {
+    let instance = &self.0;
+    gfx_select!(self.1 => instance.bind_group_drop(self.1));
   }
 }
 
@@ -176,7 +191,7 @@ pub fn op_webgpu_create_bind_group_layout(
   let device_resource = state
     .resource_table
     .get::<super::WebGpuDevice>(device_rid)?;
-  let device = device_resource.0;
+  let device = device_resource.1;
 
   let entries = entries
     .into_iter()
@@ -214,14 +229,14 @@ pub fn op_webgpu_create_pipeline_layout(
   let device_resource = state
     .resource_table
     .get::<super::WebGpuDevice>(device_rid)?;
-  let device = device_resource.0;
+  let device = device_resource.1;
 
   let bind_group_layouts = bind_group_layouts
     .into_iter()
     .map(|rid| {
       let bind_group_layout =
         state.resource_table.get::<WebGpuBindGroupLayout>(rid)?;
-      Ok(bind_group_layout.0)
+      Ok(bind_group_layout.1)
     })
     .collect::<Result<Vec<_>, AnyError>>()?;
 
@@ -260,7 +275,7 @@ pub fn op_webgpu_create_bind_group(
   let device_resource = state
     .resource_table
     .get::<super::WebGpuDevice>(device_rid)?;
-  let device = device_resource.0;
+  let device = device_resource.1;
 
   let entries = entries
     .into_iter()
@@ -274,7 +289,7 @@ pub fn op_webgpu_create_bind_group(
                 .resource_table
                 .get::<super::sampler::WebGpuSampler>(entry.resource)?;
             wgpu_core::binding_model::BindingResource::Sampler(
-              sampler_resource.0,
+              sampler_resource.1,
             )
           }
           "GPUTextureView" => {
@@ -283,7 +298,7 @@ pub fn op_webgpu_create_bind_group(
                 .resource_table
                 .get::<super::texture::WebGpuTextureView>(entry.resource)?;
             wgpu_core::binding_model::BindingResource::TextureView(
-              texture_view_resource.0,
+              texture_view_resource.1,
             )
           }
           "GPUBufferBinding" => {
@@ -293,7 +308,7 @@ pub fn op_webgpu_create_bind_group(
                 .get::<super::buffer::WebGpuBuffer>(entry.resource)?;
             wgpu_core::binding_model::BindingResource::Buffer(
               wgpu_core::binding_model::BufferBinding {
-                buffer_id: buffer_resource.0,
+                buffer_id: buffer_resource.1,
                 offset: entry.offset.unwrap_or(0),
                 size: std::num::NonZeroU64::new(entry.size.unwrap_or(0)),
               },
@@ -310,7 +325,7 @@ pub fn op_webgpu_create_bind_group(
 
   let descriptor = wgpu_core::binding_model::BindGroupDescriptor {
     label: label.map(Cow::from),
-    layout: bind_group_layout.0,
+    layout: bind_group_layout.1,
     entries: Cow::from(entries),
   };
 
