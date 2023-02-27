@@ -1228,6 +1228,7 @@ name = "deno_runtime"
 version = "0.97.0"
 dependencies = [
  "atty",
+ "chrono",
  "deno_ast",
  "deno_broadcast_channel",
  "deno_cache",

@@ -46,6 +46,9 @@ static AUDIT_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
 static AUDIT_LOG_FILE: Lazy<Arc<Mutex<Option<File>>>> =
   Lazy::new(|| Arc::new(Mutex::new(None)));
 
+static AUDIT_LOG_BUF: Lazy<Arc<Mutex<(std::time::Instant, String)>>> =
+  Lazy::new(|| Arc::new(Mutex::new((std::time::Instant::now(), Default::default()))));
+
 /// Tri-state value for storing permission state
 #[derive(Eq, PartialEq, Debug, Clone, Copy, Deserialize, PartialOrd)]
 pub enum PermissionState {
@@ -57,23 +60,20 @@ pub enum PermissionState {
 impl PermissionState {
   #[inline(always)]
   fn log_perm_access(name: &str, info: impl FnOnce() -> Option<String>) {
-    let fmt_access = Self::fmt_access(name, info);
-
     if AUDIT_LOG_ENABLED.load(Ordering::Relaxed) {
-      let mut lock = AUDIT_LOG_FILE.lock();
-      let file = lock.as_mut().unwrap();
-      file.write_all(fmt_access.as_bytes()).unwrap();
-      file.write_all("\n".as_bytes()).unwrap();
-    }
+      let mut buf_lock = AUDIT_LOG_BUF.lock();
+      let time = chrono::Utc::now();
+      buf_lock.1.push_str(&format!("{{\"datetime\": \"{time}\", \"kind\": \"{name}\"{} }}\n", info().map(|info| format!(", \"value\": {info}")).unwrap_or_default()));
 
-    // Eliminates log overhead (when logging is disabled),
-    // log_enabled!(Debug) check in a hot path still has overhead
-    // TODO(AaronO): generalize or upstream this optimization
-    if *DEBUG_LOG_ENABLED {
-      log::debug!(
-        "{}",
-        colors::bold(&format!("{}️  Granted {}", PERMISSION_EMOJI, fmt_access))
-      );
+      let new_time = std::time::Instant::now();
+      if (new_time - buf_lock.0).as_secs() >= 1 {
+        let mut file_lock = AUDIT_LOG_FILE.lock();
+        let file = file_lock.as_mut().unwrap();
+        file.write_all(buf_lock.1.as_bytes()).unwrap();
+        buf_lock.1 = String::new();
+        buf_lock.0 = new_time;
+      }
+
     }
   }
 
