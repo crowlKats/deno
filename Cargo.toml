@@ -72,6 +72,7 @@ deno_kv = { version = "0.17.0", path = "./ext/kv" }
 deno_tls = { version = "0.96.0", path = "./ext/tls" }
 deno_url = { version = "0.109.0", path = "./ext/url" }
 deno_web = { version = "0.140.0", path = "./ext/web" }
+deno_webgpu = { path = "../../wgpu/deno_webgpu" }
 deno_webidl = { version = "0.109.0", path = "./ext/webidl" }
 deno_websocket = { version = "0.114.0", path = "./ext/websocket" }
 deno_webstorage = { version = "0.104.0", path = "./ext/webstorage" }
