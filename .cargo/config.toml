@@ -12,10 +12,10 @@ rustflags = [
 ]
 
 [target.x86_64-apple-darwin]
-rustflags = ["-C", "link-args=-weak_framework Metal -weak_framework MetalPerformanceShaders"]
+rustflags = ["-C", "link-args=-weak_framework Metal -weak_framework MetalPerformanceShaders -weak_framework CoreFoundation -weak_framework CoreServices -weak_framework QuartzCore -weak_framework CoreGraphics"]
 
 [target.aarch64-apple-darwin]
-rustflags = ["-C", "link-args=-fuse-ld=lld -weak_framework Metal -weak_framework MetalPerformanceShaders"]
+rustflags = ["-C", "link-args=-fuse-ld=lld -weak_framework Metal -weak_framework MetalPerformanceShaders -weak_framework CoreFoundation -weak_framework CoreServices -weak_framework QuartzCore -weak_framework CoreGraphics"]
 
 [target.'cfg(all())']
 rustflags = [
