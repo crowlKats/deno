@@ -37,7 +37,7 @@ fn get_env_var_error_class(error: &env::VarError) -> &'static str {
   }
 }
 
-fn get_io_error_class(error: &io::Error) -> &'static str {
+pub fn get_io_error_class(error: &io::Error) -> &'static str {
   use io::ErrorKind::*;
   match error.kind() {
     NotFound => "NotFound",
@@ -100,7 +100,7 @@ fn get_regex_error_class(error: &regex::Error) -> &'static str {
   }
 }
 
-fn get_serde_json_error_class(
+pub fn get_serde_json_error_class(
   error: &serde_json::error::Error,
 ) -> &'static str {
   use deno_core::serde_json::error::*;

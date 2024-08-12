@@ -229,7 +229,7 @@ impl Loader for FetchCacher {
           if matches!(file_fetcher.cache_setting(), CacheSetting::Only) {
             return Err(deno_core::anyhow::anyhow!(
               "Could not resolve version constraint using only cached data. Try running again without --cached-only"
-            ));
+            ).into());
           }
           Some(CacheSetting::ReloadAll)
         }
@@ -276,14 +276,14 @@ impl Loader for FetchCacher {
             if io_err.kind() == std::io::ErrorKind::NotFound {
               return Ok(None);
             } else {
-              return Err(err);
+              return Err(err.into());
             }
           }
           let error_class_name = get_error_class_name(&err);
           match error_class_name {
             "NotFound" => Ok(None),
             "NotCached" if options.cache_setting == LoaderCacheSetting::Only => Ok(None),
-            _ => Err(err),
+            _ => Err(err.into()),
           }
         })
     }

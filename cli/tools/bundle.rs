@@ -151,7 +151,7 @@ fn bundle_module_graph(
     crate::args::ts_config_to_transpile_and_emit_options(
       ts_config_result.ts_config,
     )?;
-  deno_emit::bundle_graph(
+  Ok(deno_emit::bundle_graph(
     graph,
     deno_emit::BundleOptions {
       minify: false,
@@ -160,5 +160,5 @@ fn bundle_module_graph(
       emit_ignore_directives: true,
       transpile_options,
     },
-  )
+  )?)
 }

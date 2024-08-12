@@ -948,7 +948,6 @@ impl<'a> deno_graph::source::FileSystem for DenoGraphFsAdapter<'a> {
     &self,
     dir_url: &deno_graph::ModuleSpecifier,
   ) -> Vec<deno_graph::source::DirEntry> {
-    use deno_core::anyhow;
     use deno_graph::source::DirEntry;
     use deno_graph::source::DirEntryKind;
 
@@ -969,10 +968,7 @@ impl<'a> deno_graph::source::FileSystem for DenoGraphFsAdapter<'a> {
       }
       Err(err) => {
         return vec![DirEntry {
-          kind: DirEntryKind::Error(
-            anyhow::Error::from(err)
-              .context("Failed to read directory.".to_string()),
-          ),
+          kind: DirEntryKind::Error(deno_graph::source::DirEntryError::Dir(err.into_io_error())),
           url: dir_url.clone(),
         }];
       }

@@ -11,12 +11,18 @@
 
 use deno_ast::ParseDiagnostic;
 use deno_core::error::AnyError;
-use deno_graph::source::ResolveError;
+use deno_graph::source::{ChecksumIntegrityError};
+use deno_graph::source::{LoadError};
+use deno_graph::source::{ResolveError};
 use deno_graph::ModuleError;
 use deno_graph::ModuleGraphError;
 use deno_graph::ModuleLoadError;
 use deno_graph::ResolutionError;
 use import_map::ImportMapError;
+
+fn get_checksum_integrity_error_class(_: &ChecksumIntegrityError) ->&'static str {
+  "Error"
+}
 
 fn get_import_map_error_class(_: &ImportMapError) -> &'static str {
   "URIError"
@@ -44,9 +50,15 @@ fn get_module_graph_error_class(err: &ModuleGraphError) -> &'static str {
         "NotFound"
       }
       ModuleError::LoadingErr(_, _, err) => match err {
-        ModuleLoadError::Loader(err) => get_error_class_name(err.as_ref()),
-        ModuleLoadError::HttpsChecksumIntegrity(_)
-        | ModuleLoadError::TooManyRedirects => "Error",
+        ModuleLoadError::Loader(err) => match err.as_ref() {
+          LoadError::UnsupportedScheme(_) => "TypeError",
+          LoadError::ChecksumIntegrity(err) => get_checksum_integrity_error_class(err),
+          LoadError::JsonParse(err) => deno_runtime::errors::get_serde_json_error_class(err),
+          LoadError::DataRead(err) => deno_runtime::errors::get_io_error_class(err),
+          LoadError::Other(err) => get_error_class_name(err),
+        },
+        ModuleLoadError::HttpsChecksumIntegrity(err) => get_checksum_integrity_error_class(err),
+        ModuleLoadError::TooManyRedirects => "Error",
         ModuleLoadError::NodeUnknownBuiltinModule(_) => "NotFound",
         ModuleLoadError::Decode(_) => "TypeError",
         ModuleLoadError::Npm(err) => match err {
@@ -81,6 +93,7 @@ fn get_resolution_error_class(err: &ResolutionError) -> &'static str {
       use ResolveError::*;
       match error.as_ref() {
         Specifier(_) => "TypeError",
+        ImportMap(e) => get_import_map_error_class(e),
         Other(e) => get_error_class_name(e),
       }
     }
