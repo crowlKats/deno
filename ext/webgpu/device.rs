@@ -506,6 +506,7 @@ impl GPUDevice {
     GPUCommandEncoder {
       instance: self.instance.clone(),
       error_handler: self.error_handler.clone(),
+      finished: Default::default(),
       id,
       label,
     }

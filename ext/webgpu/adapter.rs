@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use deno_core::cppgc::SameObject;
@@ -136,13 +137,36 @@ impl GPUAdapter {
       memory_hints: Default::default(),
     };
 
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let trace_path = std::env::var("DENO_WEBGPU_TRACE")
+      .ok()
+      .as_ref()
+      .map(std::path::Path::new)
+      .map(|path| {
+        path.join(format!(
+          "{}",
+          COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        ))
+      });
+    
+    if let Some(trace_path) = &trace_path {
+      std::fs::create_dir_all(trace_path).map_err(CreateDeviceError::Trace)?;
+    }
+
     let (device, queue) = self.instance.adapter_request_device(
       self.id,
       &wgpu_descriptor,
       std::env::var("DENO_WEBGPU_TRACE")
         .ok()
         .as_ref()
-        .map(std::path::Path::new),
+        .map(std::path::Path::new)
+        .map(|path| {
+          path.join(format!(
+            "{}",
+            COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+          ))
+        })
+        .as_deref(),
       None,
       None,
     )?;
@@ -244,6 +268,9 @@ pub enum CreateDeviceError {
   #[class(type)]
   #[error(transparent)]
   Device(#[from] wgpu_core::instance::RequestDeviceError),
+  #[class(inherit)]
+  #[error("Couldn't create trace path")]
+  Trace(#[source] std::io::Error),
 }
 
 pub struct GPUSupportedLimits(pub wgpu_types::Limits);

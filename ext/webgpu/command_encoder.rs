@@ -1,6 +1,7 @@
 // Copyright 2018-2025 the Deno authors. MIT license.
 
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::cell::RefCell;
 
 use deno_core::cppgc::Ptr;
@@ -24,13 +25,16 @@ pub struct GPUCommandEncoder {
   pub instance: Instance,
   pub error_handler: super::error::ErrorHandler,
 
+  pub finished: OnceCell<()>,
   pub id: wgpu_core::id::CommandEncoderId,
   pub label: String,
 }
 
 impl Drop for GPUCommandEncoder {
   fn drop(&mut self) {
-    self.instance.command_encoder_drop(self.id);
+    if self.finished.get().is_none() {
+      self.instance.command_encoder_drop(self.id);
+    }
   }
 }
 
@@ -340,6 +344,8 @@ impl GPUCommandEncoder {
     let (id, err) = self
       .instance
       .command_encoder_finish(self.id, &wgpu_descriptor);
+
+    let _ = self.finished.set(());
 
     self.error_handler.push_error(err);
 
