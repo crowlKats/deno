@@ -2,3 +2,4 @@
 
 export * from "https://raw.githubusercontent.com/denoland/automation/0.19.0/mod.ts";
 export * from "https://raw.githubusercontent.com/denoland/automation/0.19.0/github_actions.ts";
+export * from "npm:octokit";
