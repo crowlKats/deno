@@ -29,6 +29,11 @@ thiserror.workspace = true
 tokio.workspace = true
 urlpattern.workspace = true
 uuid = { workspace = true, features = ["serde"] }
+candle-core = { version = "0.9.2-alpha.1", features = ["metal"] }
+candle-nn = { version = "0.9.2-alpha.1", features = ["metal"] }
+candle-transformers = { version = "0.9.2-alpha.1", features = ["metal"] }
+tokenizers = "0.22.1"
+hf-hub = "0.4.3"
 
 [dev-dependencies]
 deno_bench_util.workspace = true

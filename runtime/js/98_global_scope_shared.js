@@ -30,6 +30,7 @@ import * as webidl from "ext:deno_webidl/00_webidl.js";
 import { DOMException } from "ext:deno_web/01_dom_exception.js";
 import * as abortSignal from "ext:deno_web/03_abort_signal.js";
 import * as imageData from "ext:deno_web/16_image_data.js";
+import * as ML from "ext:deno_web/17_ml.js";
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import {
@@ -49,6 +50,7 @@ const loadWebTransport = core.createLazyLoader("ext:deno_web/webtransport.js");
 
 // https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope
 const windowOrWorkerGlobalScope = {
+  mlPrompt: core.propNonEnumerable(ML.prompt),
   AbortController: core.propNonEnumerable(abortSignal.AbortController),
   AbortSignal: core.propNonEnumerable(abortSignal.AbortSignal),
   Blob: core.propNonEnumerable(file.Blob),
