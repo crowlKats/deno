@@ -1,12 +1,17 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::io::Write;
-use candle_transformers::generation::Sampling;
-use candle_transformers::models::llama::LlamaConfig;
-use deno_core::{op2, v8, WebIDL};
+use std::rc::Rc;
+use std::time::Instant;
+use candle_core::Device;
+use candle_transformers::generation::{LogitsProcessor, Sampling};
+use candle_transformers::models::llama::{Cache, Llama, LlamaConfig};
+use deno_core::{op2, v8, OpState, Resource, ResourceId, WebIDL};
 use deno_core::{GarbageCollected};
 use deno_core::convert::OptionNull;
 use deno_core::v8::{Local, PinScope, Value};
 use deno_core::webidl::{ContextFn, UnrestrictedDouble, WebIdlConverter, WebIdlError};
+use serde::Serialize;
 /*
 struct LanguageModel {}
 
@@ -359,6 +364,220 @@ pub async fn ml_prompt(#[string] prompt: String) -> String {
 
   out
 }
+
+#[op2(async)]
+#[smi]
+pub async fn ml_prompt_stream(
+  state: Rc<RefCell<OpState>>,
+  #[string] prompt: String
+) -> deno_core::ResourceId {
+  let device = if candle_core::utils::cuda_is_available() {
+    candle_core::Device::new_cuda(0).unwrap()
+  } else if candle_core::utils::metal_is_available() {
+    candle_core::Device::new_metal(0).unwrap()
+  } else {
+    candle_core::Device::Cpu
+  };
+
+  let dtype = candle_core::DType::F16;
+  let (llama, tokenizer_filename, mut cache, config) = {
+    let api = hf_hub::api::tokio::ApiBuilder::new()
+      .with_progress(false)
+      .build().unwrap();
+    let model_id = "HuggingFaceTB/SmolLM2-360M-Instruct";
+    let api = api.repo(hf_hub::Repo::with_revision(model_id.to_string(), hf_hub::RepoType::Model, "main".to_string()));
+
+    let tokenizer_filename = api.get("tokenizer.json").await.unwrap();
+    let config_filename = api.get("config.json").await.unwrap();
+    let config: LlamaConfig = deno_core::serde_json::from_slice(&std::fs::read(config_filename).unwrap()).unwrap();
+    let config = config.into_config(false);
+
+    let json_file = api.get("model.safetensors").await.unwrap();
+    /*let json_file = std::fs::File::open(json_file).unwrap();
+    let json: deno_core::serde_json::Value =
+      deno_core::serde_json::from_reader(&json_file).unwrap();
+    let weight_map = match json.get("weight_map") {
+      Some(deno_core::serde_json::Value::Object(map)) => map,
+      _ => unreachable!(),
+    };
+    let mut safetensors_files = std::collections::HashSet::new();
+    for value in weight_map.values() {
+      if let Some(file) = value.as_str() {
+        safetensors_files.insert(file.to_string());
+      }
+    }
+
+    for safetensors_file in &safetensors_files {
+      api.get(safetensors_file).await.unwrap();
+    }
+    let safetensors_files = safetensors_files.into_iter().collect::<Vec<_>>();
+*/
+    let safetensors_files = vec![json_file];
+
+
+    let cache = candle_transformers::models::llama::Cache::new(true, dtype, &config, &device).unwrap();
+
+    let vb = unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&safetensors_files, dtype, &device).unwrap() };
+    (candle_transformers::models::llama::Llama::load(vb, &config).unwrap(), tokenizer_filename, cache, config)
+  };
+  let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_filename).unwrap();
+  let eos_token_id = config.eos_token_id.or_else(|| {
+    let mut tokens = vec![];
+
+    if let Some(token) = tokenizer.token_to_id("<|end_of_text|>") {
+      tokens.push(token);
+    }
+    if let Some(token) = tokenizer.token_to_id("<|eot_id|>") {
+      tokens.push(token);
+    }
+    if let Some(token) = tokenizer.token_to_id("</s>") {
+      tokens.push(token);
+    }
+
+    if tokens.is_empty() {
+      None
+    } else {
+      Some(candle_transformers::models::llama::LlamaEosToks::Multiple(tokens))
+    }
+  });
+
+  let mut tokens = tokenizer
+    .encode(format!("You are a helpful assistant.\nUser: {prompt}\nAssistant:"), false)
+    .unwrap()
+    .get_ids()
+    .to_vec();
+  let mut tokenizer = TokenOutputStream::new(tokenizer);
+
+  let mut logits_processor = {
+    let temperature = 0.8;
+    let sampling = if temperature <= 0. {
+      Sampling::ArgMax
+    } else {
+      let top_k = None;
+      let top_p = None;
+      match (top_k, top_p) {
+        (None, None) => Sampling::All { temperature },
+        (Some(k), None) => Sampling::TopK { k, temperature },
+        (None, Some(p)) => Sampling::TopP { p, temperature },
+        (Some(k), Some(p)) => Sampling::TopKThenTopP { k, p, temperature },
+      }
+    };
+    candle_transformers::generation::LogitsProcessor::from_sampling(299792458, sampling)
+  };
+
+  let start_gen = Instant::now();
+  let index_pos = 0;
+  let token_generated = 0;
+
+  let mut s = state.borrow_mut();
+  s.resource_table.add(MLResource {
+    eos_token_id,
+    device: RefCell::new(device),
+    llama: RefCell::new(llama),
+    cache: RefCell::new(cache),
+    tokens: RefCell::new(tokens),
+    tokenizer: RefCell::new(tokenizer),
+    logits_processor: RefCell::new(logits_processor),
+    start_gen: RefCell::new(start_gen),
+    index_pos: RefCell::new(index_pos),
+    token_generated: RefCell::new(token_generated),
+  })
+}
+
+struct MLResource {
+  eos_token_id: Option<candle_transformers::models::llama::LlamaEosToks>,
+  device: RefCell<Device>,
+  llama: RefCell<Llama>,
+  cache: RefCell<Cache>,
+  tokens: RefCell<Vec<u32>>,
+  tokenizer: RefCell<TokenOutputStream>,
+  logits_processor: RefCell<LogitsProcessor>,
+  start_gen: RefCell<Instant>,
+  index_pos: RefCell<usize>,
+  token_generated: RefCell<i32>,
+}
+
+impl Resource for MLResource {}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "data", rename_all = "camelCase")]
+enum ReadRes {
+  Ok(String),
+  Eof,
+}
+
+#[op2(async)]
+#[serde]
+pub async fn ml_prompt_stream_read(state: Rc<RefCell<OpState>>, #[smi] rid: ResourceId, #[number] index: u64) -> Option<ReadRes> {
+  let mut s = state.borrow_mut();
+  let ml = s.resource_table.get::<MLResource>(rid).unwrap();
+
+  let eos_token_id = &ml.eos_token_id;
+  let mut device = ml.device.borrow_mut();
+  let mut llama = ml.llama.borrow_mut();
+  let mut cache = ml.cache.borrow_mut();
+  let mut tokens = ml.tokens.borrow_mut();
+  let mut tokenizer = ml.tokenizer.borrow_mut();
+  let mut logits_processor = ml.logits_processor.borrow_mut();
+  let mut start_gen = ml.start_gen.borrow_mut();
+  let mut index_pos = ml.index_pos.borrow_mut();
+  let mut token_generated = ml.token_generated.borrow_mut();
+
+
+  let (context_size, context_index) = if cache.use_kv_cache && index > 0 {
+    (1, *index_pos)
+  } else {
+    (tokens.len(), 0)
+  };
+  if index == 1 {
+    *start_gen = std::time::Instant::now()
+  }
+  let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
+  let input = candle_core::Tensor::new(ctxt, &device).unwrap().unsqueeze(0).unwrap();
+  let logits = llama.forward(&input, context_index, &mut cache).unwrap();
+  let logits = logits.squeeze(0).unwrap();
+  let repeat_penalty = 1.1;
+  let logits = if repeat_penalty == 1. {
+    logits
+  } else {
+    let start_at = tokens.len().saturating_sub(128);
+    candle_transformers::utils::apply_repeat_penalty(
+      &logits,
+      repeat_penalty,
+      &tokens[start_at..],
+    ).unwrap()
+  };
+  *index_pos += ctxt.len();
+
+  let next_token = logits_processor.sample(&logits).unwrap();
+  *token_generated += 1;
+  tokens.push(next_token);
+
+  match eos_token_id {
+    Some(candle_transformers::models::llama::LlamaEosToks::Single(eos_tok_id)) if &next_token == eos_tok_id => {
+      return Some(ReadRes::Eof);
+    }
+    Some(candle_transformers::models::llama::LlamaEosToks::Multiple(eos_ids)) if eos_ids.contains(&next_token) => {
+      return Some(ReadRes::Eof);
+    }
+    _ => (),
+  }
+
+  tokenizer.next_token(next_token).unwrap().map(ReadRes::Ok)
+}
+
+#[op2(async)]
+#[string]
+pub async fn ml_prompt_stream_end(state: Rc<RefCell<OpState>>, #[smi] rid: ResourceId) -> Option<String> {
+  let mut s = state.borrow_mut();
+  let ml = s.resource_table.get::<MLResource>(rid).unwrap();
+  let mut tokenizer = ml.tokenizer.borrow_mut();
+
+  tokenizer.decode_rest().unwrap()
+}
+
+
+
 
 pub struct TokenOutputStream {
   tokenizer: tokenizers::Tokenizer,

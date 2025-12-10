@@ -51,6 +51,7 @@ const loadWebTransport = core.createLazyLoader("ext:deno_web/webtransport.js");
 // https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope
 const windowOrWorkerGlobalScope = {
   mlPrompt: core.propNonEnumerable(ML.prompt),
+  mlPromptStreaming: core.propNonEnumerable(ML.promptStreaming),
   AbortController: core.propNonEnumerable(abortSignal.AbortController),
   AbortSignal: core.propNonEnumerable(abortSignal.AbortSignal),
   Blob: core.propNonEnumerable(file.Blob),
