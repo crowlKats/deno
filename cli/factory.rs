@@ -659,7 +659,8 @@ impl CliFactory {
             | DenoSubcommand::Vendor
             | DenoSubcommand::Publish { .. }
             | DenoSubcommand::Help { .. }
-            | DenoSubcommand::X { .. } => false,
+            | DenoSubcommand::X { .. }
+            | DenoSubcommand::Replay { .. } => false,
           },
           cache_setting: NpmCacheSetting::from_cache_setting(
             &cli_options.cache_setting(),
@@ -1181,7 +1182,8 @@ impl CliFactory {
       // This optimization is only available for "run" subcommand
       // because we need to register new ops for testing and jupyter
       // integration.
-      skip_op_registration: cli_options.sub_command().is_run(),
+      skip_op_registration: cli_options.sub_command().is_run()
+        || matches!(cli_options.sub_command(), DenoSubcommand::Replay(_)),
       log_level: cli_options.log_level().unwrap_or(log::Level::Info).into(),
       enable_testing_features: cli_options.enable_testing_features(),
       has_node_modules_dir: workspace_factory
@@ -1190,6 +1192,7 @@ impl CliFactory {
       inspect_brk: cli_options.inspect_brk(),
       inspect_wait: cli_options.inspect_wait(),
       trace_ops: cli_options.trace_ops().clone(),
+      trace_mode: cli_options.trace_mode(),
       is_standalone: false,
       auto_serve: std::env::var("DENO_AUTO_SERVE").is_ok(),
       is_inspecting: cli_options.is_inspecting(),

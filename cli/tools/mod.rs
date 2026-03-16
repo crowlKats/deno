@@ -17,6 +17,7 @@ pub mod lint;
 pub mod pm;
 pub mod publish;
 pub mod repl;
+pub mod replay;
 pub mod run;
 pub mod serve;
 pub mod task;

@@ -238,6 +238,7 @@ pub struct LibMainWorkerOptions {
   pub inspect_brk: bool,
   pub inspect_wait: bool,
   pub trace_ops: Option<Vec<String>>,
+  pub trace_mode: Option<deno_core::TraceMode>,
   pub is_inspecting: bool,
   /// If this is a `deno compile`-ed executable.
   pub is_standalone: bool,
@@ -692,6 +693,7 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
       should_break_on_first_statement: shared.options.inspect_brk,
       should_wait_for_inspector_session: shared.options.inspect_wait,
       trace_ops: shared.options.trace_ops.clone(),
+      trace_mode: shared.options.trace_mode.clone(),
       cache_storage_dir,
       origin_storage_dir,
       stdio,

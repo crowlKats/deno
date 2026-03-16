@@ -125,6 +125,14 @@ pub struct ContextState {
   /// # Safety
   /// Same lifetime requirements as `uv_loop_inner` above.
   pub(crate) uv_loop_ptr: Cell<Option<*mut crate::uv_compat::uv_loop_t>>,
+
+  /// Trace recorder for recording async op results.
+  pub(crate) trace_recorder: Option<crate::trace::TraceRecorder>,
+  /// Trace replayer for replaying recorded async op results.
+  pub(crate) trace_replayer: Option<crate::trace::TraceReplayer>,
+  /// Queue of (promise_id, op_id) pairs for ops called during replay.
+  /// Populated by map_async_op_* when replaying, consumed by dispatch_replay_ops.
+  pub(crate) replay_promise_queue: crate::ops::ReplayPromiseQueue,
 }
 
 impl ContextState {
@@ -135,12 +143,76 @@ impl ContextState {
   pub(crate) fn new(
     op_driver: Rc<OpDriverImpl>,
     isolate_ptr: v8::UnsafeRawIsolatePtr,
-    op_ctxs: Box<[OpCtx]>,
+    mut op_ctxs: Box<[OpCtx]>,
     op_method_decls: Vec<OpMethodDecl>,
     methods_ctx_offset: usize,
     external_ops_tracker: ExternalOpsTracker,
     unrefed_ops: UnrefedOps,
+    trace_mode: Option<crate::trace::TraceMode>,
   ) -> Self {
+    // Initialize trace recorder/replayer based on trace_mode
+    let op_names: Vec<String> =
+      op_ctxs.iter().map(|ctx| ctx.decl.name.to_string()).collect();
+    let is_recording = matches!(
+      trace_mode,
+      Some(crate::trace::TraceMode::Record { .. })
+    );
+
+    // When recording, set the flag on all OpCtx so async ops use lazy
+    // scheduling and flow through dispatch_pending_ops() for capture.
+    if is_recording {
+      for op_ctx in op_ctxs.iter_mut() {
+        op_ctx.trace_recording = true;
+      }
+    }
+
+    let mut trace_recorder = None;
+    let mut trace_replayer = None;
+    let replay_promise_queue: crate::ops::ReplayPromiseQueue =
+      Default::default();
+
+    if let Some(mode) = trace_mode {
+      match mode {
+        crate::trace::TraceMode::Record {
+          ref path,
+          ref entry_point,
+        } => {
+          match crate::trace::TraceRecorder::new(
+            path,
+            entry_point.clone(),
+            op_names,
+          ) {
+            Ok(recorder) => trace_recorder = Some(recorder),
+            Err(e) => {
+              #[allow(clippy::print_stderr)]
+              {
+                eprintln!("Warning: failed to initialize trace recorder: {e}");
+              }
+            }
+          }
+        }
+        crate::trace::TraceMode::Replay(ref path) => {
+          match crate::trace::TraceReplayer::from_file(path) {
+            Ok(replayer) => {
+              trace_replayer = Some(replayer);
+              // Set replay queue on all OpCtx so async ops enqueue
+              // their promise_id instead of running real futures.
+              for op_ctx in op_ctxs.iter_mut() {
+                op_ctx.replay_promise_queue =
+                  Some(replay_promise_queue.clone());
+              }
+            }
+            Err(e) => {
+              #[allow(clippy::print_stderr)]
+              {
+                eprintln!("Warning: failed to initialize trace replayer: {e}");
+              }
+            }
+          }
+        }
+      }
+    }
+
     Self {
       isolate: Some(isolate_ptr),
       exception_state: Default::default(),
@@ -167,6 +239,9 @@ impl ContextState {
       event_loop_phases: Default::default(),
       uv_loop_inner: Cell::new(None),
       uv_loop_ptr: Cell::new(None),
+      trace_recorder,
+      trace_replayer,
+      replay_promise_queue,
     }
   }
 }

@@ -35,6 +35,7 @@ pub mod reactor_tokio;
 mod runtime;
 mod source_map;
 mod tasks;
+pub mod trace;
 #[allow(
   non_camel_case_types,
   non_upper_case_globals,
@@ -185,6 +186,9 @@ pub use crate::runtime::stats;
 pub use crate::source_map::SourceMapData;
 pub use crate::tasks::V8CrossThreadTaskSpawner;
 pub use crate::tasks::V8TaskSpawner;
+pub use crate::trace::TraceMode;
+pub use crate::trace::TraceRecorder;
+pub use crate::trace::TraceReplayer;
 
 // Ensure we can use op2 in deno_core without any hackery.
 extern crate self as deno_core;

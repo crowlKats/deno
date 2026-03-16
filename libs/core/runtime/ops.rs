@@ -40,8 +40,29 @@ pub fn map_async_op_infallible<R: 'static>(
   op: impl Future<Output = R> + 'static,
   rv_map: V8RetValMapper<R>,
 ) -> Option<R> {
+  // In replay mode, don't run the real op — just record the promise_id
+  // and submit a pending-forever future to keep the op driver alive.
+  if let Some(ref queue) = ctx.replay_promise_queue {
+    queue.borrow_mut().push_back((promise_id, ctx.id));
+    ctx.op_driver().submit_op_infallible_scheduling(
+      OpScheduling::Lazy,
+      ctx.id,
+      promise_id,
+      std::future::pending::<R>(),
+      rv_map,
+    );
+    return None;
+  }
+
+  // When recording, force lazy scheduling so all ops flow through
+  // dispatch_pending_ops() where the recording hook captures results.
+  let scheduling = if ctx.trace_recording {
+    OpScheduling::Lazy
+  } else {
+    op_scheduling(lazy, deferred)
+  };
   ctx.op_driver().submit_op_infallible_scheduling(
-    op_scheduling(lazy, deferred),
+    scheduling,
     ctx.id,
     promise_id,
     op,
@@ -58,8 +79,29 @@ pub fn map_async_op_fallible<R: 'static, E: JsErrorClass + 'static>(
   op: impl Future<Output = Result<R, E>> + 'static,
   rv_map: V8RetValMapper<R>,
 ) -> Option<Result<R, E>> {
+  // In replay mode, don't run the real op — just record the promise_id
+  // and submit a pending-forever future to keep the op driver alive.
+  if let Some(ref queue) = ctx.replay_promise_queue {
+    queue.borrow_mut().push_back((promise_id, ctx.id));
+    ctx.op_driver().submit_op_fallible_scheduling(
+      OpScheduling::Lazy,
+      ctx.id,
+      promise_id,
+      std::future::pending::<Result<R, E>>(),
+      rv_map,
+    );
+    return None;
+  }
+
+  // When recording, force lazy scheduling so all ops flow through
+  // dispatch_pending_ops() where the recording hook captures results.
+  let scheduling = if ctx.trace_recording {
+    OpScheduling::Lazy
+  } else {
+    op_scheduling(lazy, deferred)
+  };
   ctx.op_driver().submit_op_fallible_scheduling(
-    op_scheduling(lazy, deferred),
+    scheduling,
     ctx.id,
     promise_id,
     op,

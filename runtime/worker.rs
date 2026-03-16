@@ -251,6 +251,8 @@ pub struct WorkerOptions {
   pub should_wait_for_inspector_session: bool,
   /// If Some, print a low-level trace output for ops matching the given patterns.
   pub trace_ops: Option<Vec<String>>,
+  /// Trace recording/replay mode.
+  pub trace_mode: Option<deno_core::TraceMode>,
 
   pub cache_storage_dir: Option<std::path::PathBuf>,
   pub origin_storage_dir: Option<std::path::PathBuf>,
@@ -273,6 +275,7 @@ impl Default for WorkerOptions {
       should_break_on_first_statement: Default::default(),
       should_wait_for_inspector_session: Default::default(),
       trace_ops: Default::default(),
+      trace_mode: Default::default(),
       format_js_error_fn: Default::default(),
       origin_storage_dir: Default::default(),
       cache_storage_dir: Default::default(),
@@ -459,6 +462,7 @@ impl MainWorker {
         extensions,
         op_metrics_factory_fn,
         enable_stack_trace_arg_in_ops: options.enable_stack_trace_arg_in_ops,
+        trace_mode: options.trace_mode,
       })
     };
 
@@ -1141,6 +1145,7 @@ struct CommonRuntimeOptions {
   extensions: Vec<Extension>,
   op_metrics_factory_fn: Option<OpMetricsFactoryFn>,
   enable_stack_trace_arg_in_ops: bool,
+  trace_mode: Option<deno_core::TraceMode>,
 }
 
 struct EnableRawImports(Arc<AtomicBool>);
@@ -1180,6 +1185,7 @@ fn common_runtime(opts: CommonRuntimeOptions) -> JsRuntime {
     v8_platform: None,
     custom_module_evaluation_cb: None,
     eval_context_code_cache_cbs: None,
+    trace_mode: opts.trace_mode,
   });
 
   js_runtime
@@ -1248,6 +1254,7 @@ impl UnconfiguredRuntime {
       extensions,
       op_metrics_factory_fn: None,
       enable_stack_trace_arg_in_ops: false,
+      trace_mode: None,
     });
 
     UnconfiguredRuntime {

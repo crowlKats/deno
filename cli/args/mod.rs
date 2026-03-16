@@ -774,6 +774,22 @@ impl CliOptions {
                   .map_err(|e| e.into())
               },
             )?,
+          DenoSubcommand::Replay(replay_flags) => {
+            // Read the entry point from the trace file header
+            let info =
+              deno_core::trace::read_trace_info(Path::new(&replay_flags.trace_file))
+                .map_err(|e| {
+                  deno_core::anyhow::anyhow!(
+                    "Failed to read trace file '{}': {}",
+                    replay_flags.trace_file,
+                    e
+                  )
+                })?;
+            if info.header.entry_point.is_empty() {
+              bail!("Trace file does not contain an entry point.")
+            }
+            resolve_url_or_path(&info.header.entry_point, self.initial_cwd())?
+          }
           _ => {
             bail!("No main module.")
           }
@@ -1253,6 +1269,23 @@ impl CliOptions {
 
   pub fn trace_ops(&self) -> &Option<Vec<String>> {
     &self.flags.trace_ops
+  }
+
+  pub fn trace_mode(&self) -> Option<deno_core::TraceMode> {
+    match &self.flags.subcommand {
+      DenoSubcommand::Run(run_flags) => run_flags.record.as_ref().map(|path| {
+        deno_core::TraceMode::Record {
+          path: std::path::PathBuf::from(path),
+          entry_point: run_flags.script.clone(),
+        }
+      }),
+      DenoSubcommand::Replay(replay_flags) => {
+        Some(deno_core::TraceMode::Replay(std::path::PathBuf::from(
+          &replay_flags.trace_file,
+        )))
+      }
+      _ => None,
+    }
   }
 
   pub fn take_binary_npm_command_name(&self) -> Option<String> {

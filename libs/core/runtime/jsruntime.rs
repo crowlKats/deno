@@ -569,6 +569,11 @@ pub struct RuntimeOptions {
   /// annotated with `stack_trace` attribute. Use wisely, as it's very expensive
   /// to collect stack traces on each op invocation.
   pub maybe_op_stack_trace_callback: Option<OpStackTraceCallback>,
+
+  /// Trace recording/replay mode. When set to `Record`, async op results are
+  /// written to a trace file. When set to `Replay`, a trace file is read and
+  /// op results are replayed deterministically.
+  pub trace_mode: Option<crate::trace::TraceMode>,
 }
 
 impl RuntimeOptions {
@@ -883,6 +888,7 @@ impl JsRuntime {
       methods_ctx_offset,
       op_state.borrow().external_ops_tracker.clone(),
       unrefed_ops,
+      options.trace_mode.take(),
     ));
 
     // TODO(bartlomieju): factor out
@@ -3009,6 +3015,11 @@ impl JsRuntime {
     scope: &mut v8::PinScope<'s, 'i>,
     context_state: &ContextState,
   ) -> Result<bool, Box<JsError>> {
+    // If we're in replay mode, dispatch from recorded trace instead
+    if context_state.trace_replayer.is_some() {
+      return Self::dispatch_replay_ops(cx, scope, context_state);
+    }
+
     const MAX_VEC_SIZE_FOR_OPS: usize = 1024;
 
     let mut args: SmallVec<[v8::Local<v8::Value>; 32]> =
@@ -3039,6 +3050,17 @@ impl JsRuntime {
         }
       }
 
+      // Record the op result if tracing is enabled
+      if let Some(ref recorder) = context_state.trace_recorder {
+        let is_ok = res.is_ok();
+        let v8_value =
+          res.as_ref().unwrap_or_else(|e| e).clone();
+        let json_value: serde_json::Value =
+          serde_v8::from_v8(scope, v8_value).unwrap_or(serde_json::Value::Null);
+        let payload = serde_json::to_vec(&json_value).unwrap_or_default();
+        recorder.record_event(op_id, promise_id, is_ok, payload);
+      }
+
       context_state.unrefed_ops.borrow_mut().remove(&promise_id);
       context_state
         .activity_traces
@@ -3050,6 +3072,110 @@ impl JsRuntime {
 
     if args.is_empty() {
       return Ok(false);
+    }
+
+    let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
+
+    v8::tc_scope!(let tc_scope, scope);
+
+    let resolve_ops_cb = context_state.js_resolve_ops_cb.borrow();
+    let resolve_ops_fn = resolve_ops_cb.as_ref().unwrap().open(tc_scope);
+    resolve_ops_fn.call(tc_scope, undefined, args.as_slice());
+
+    if let Some(exception) = tc_scope.exception() {
+      return exception_to_err_result(tc_scope, exception, false, true);
+    }
+    if tc_scope.has_terminated() || tc_scope.is_execution_terminating() {
+      return Ok(false);
+    }
+
+    Ok(true)
+  }
+
+  /// Dispatch replay ops from recorded trace data.
+  /// Instead of polling real async ops, this reads recorded events
+  /// and resolves promises with the recorded values.
+  ///
+  /// The replay_promise_queue is populated by map_async_op_* when they
+  /// detect replay mode. Each entry is a (promise_id, op_id) that JS
+  /// assigned when calling the op. We pair these with recorded trace
+  /// events (matched by order) to resolve promises with recorded data.
+  fn dispatch_replay_ops<'s, 'i>(
+    cx: &mut Context,
+    scope: &mut v8::PinScope<'s, 'i>,
+    context_state: &ContextState,
+  ) -> Result<bool, Box<JsError>> {
+    let replayer = context_state.trace_replayer.as_ref().unwrap();
+    let mut queue = context_state.replay_promise_queue.borrow_mut();
+
+    if queue.is_empty() || !replayer.has_more() {
+      // If there are queued ops waiting but no more recorded events,
+      // we can't satisfy them — the trace is shorter than the execution.
+      if !queue.is_empty() && !replayer.has_more() {
+        #[allow(clippy::print_stderr)]
+        {
+          eprintln!(
+            "Warning: replay trace exhausted with {} pending ops",
+            queue.len()
+          );
+        }
+        queue.clear();
+      }
+      return Ok(false);
+    }
+
+    let mut args: SmallVec<[v8::Local<v8::Value>; 32]> =
+      SmallVec::with_capacity(32);
+
+    const MAX_BATCH: usize = 1024;
+    let mut count = 0;
+
+    while count < MAX_BATCH {
+      // We need both a queued op and a recorded event
+      let Some((promise_id, _op_id)) = queue.pop_front() else {
+        break;
+      };
+      let Some(event) = replayer.next_event() else {
+        // Put the op back — no matching event
+        queue.push_front((promise_id, _op_id));
+        break;
+      };
+
+      // Deserialize the recorded payload back to a V8 value
+      let v8_value: v8::Local<v8::Value> = if event.payload.is_empty() {
+        v8::undefined(scope).into()
+      } else {
+        match serde_json::from_slice::<serde_json::Value>(&event.payload) {
+          Ok(json_value) => serde_v8::to_v8(scope, json_value)
+            .unwrap_or_else(|_| v8::undefined(scope).into()),
+          Err(_) => v8::undefined(scope).into(),
+        }
+      };
+
+      context_state
+        .unrefed_ops
+        .borrow_mut()
+        .remove(&promise_id);
+
+      args.push(v8::Integer::new(scope, promise_id).into());
+      args.push(v8::Boolean::new(scope, event.is_ok).into());
+      args.push(v8_value);
+
+      count += 1;
+    }
+
+    // Drop the borrow before calling JS
+    drop(queue);
+
+    if args.is_empty() {
+      return Ok(false);
+    }
+
+    // Wake if there are more events or queued ops to process
+    if replayer.has_more()
+      || !context_state.replay_promise_queue.borrow().is_empty()
+    {
+      cx.waker().wake_by_ref();
     }
 
     let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();

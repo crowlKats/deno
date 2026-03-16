@@ -650,6 +650,7 @@ impl WebWorker {
       wait_for_inspector_disconnect_callback: None,
       custom_module_evaluation_cb: None,
       eval_context_code_cache_cbs: None,
+      trace_mode: None,
     });
 
     {

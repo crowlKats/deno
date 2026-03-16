@@ -249,6 +249,9 @@ async fn run_subcommand(
     DenoSubcommand::Repl(repl_flags) => spawn_subcommand(async move {
       tools::repl::run(Arc::new(flags), repl_flags).await
     }),
+    DenoSubcommand::Replay(replay_flags) => spawn_subcommand(async {
+      tools::replay::replay(Arc::new(flags), replay_flags).await
+    }),
     DenoSubcommand::X(x_flags) => {
       spawn_subcommand(
         async move { tools::x::run(Arc::new(flags), x_flags).await },

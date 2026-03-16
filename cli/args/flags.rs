@@ -421,6 +421,14 @@ pub struct RunFlags {
   pub bare: bool,
   pub coverage_dir: Option<String>,
   pub print_task_list: bool,
+  pub record: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayFlags {
+  pub trace_file: String,
+  pub info: bool,
+  pub validate: bool,
 }
 
 impl RunFlags {
@@ -432,6 +440,7 @@ impl RunFlags {
       bare: false,
       coverage_dir: None,
       print_task_list: false,
+      record: None,
     }
   }
 
@@ -638,6 +647,7 @@ pub enum DenoSubcommand {
   Lsp,
   Lint(LintFlags),
   Repl(ReplFlags),
+  Replay(ReplayFlags),
   Run(RunFlags),
   Serve(ServeFlags),
   Task(TaskFlags),
@@ -1896,6 +1906,7 @@ pub fn flags_from_vec_with_initial_cwd(
         "lsp" => lsp_parse(&mut flags, &mut m),
         "outdated" => outdated_parse(&mut flags, &mut m, false)?,
         "repl" => repl_parse(&mut flags, &mut m)?,
+        "replay" => replay_parse(&mut flags, &mut m),
         "run" => run_parse(&mut flags, &mut m, app, false)?,
         "serve" => serve_parse(&mut flags, &mut m, app)?,
         "task" => task_parse(&mut flags, &mut m, app)?,
@@ -2168,6 +2179,7 @@ pub fn clap_root() -> Command {
         .subcommand(lint_subcommand())
         .subcommand(publish_subcommand())
         .subcommand(repl_subcommand())
+        .subcommand(replay_subcommand())
         .subcommand(task_subcommand())
         .subcommand(test_subcommand())
         .subcommand(types_subcommand())
@@ -4054,7 +4066,14 @@ fn run_args(command: Command, top_level: bool) -> Command {
       })
       .arg(env_file_arg())
       .arg(no_code_cache_arg())
-      .arg(coverage_arg()),
+      .arg(coverage_arg())
+      .arg(
+        Arg::new("record")
+          .long("record")
+          .help("Record execution trace to a file for deterministic replay")
+          .value_name("FILE")
+          .value_hint(ValueHint::FilePath),
+      ),
   )
   .arg(tunnel_arg())
 }
@@ -4143,6 +4162,46 @@ Specifying the filename '-' to read the file from stdin.
   <p(245)>curl https://docs.deno.com/hello_world.ts | deno run -</>
 
 <y>Read more:</> <c>https://docs.deno.com/go/run</>"), UnstableArgsConfig::ResolutionAndRuntime), false)
+}
+
+fn replay_subcommand() -> Command {
+  command(
+    "replay",
+    cstr!(
+      "Replay a recorded execution trace.
+
+Replay a recorded session:
+  <p(245)>deno replay recording.bin</>
+
+Show trace info:
+  <p(245)>deno replay --info recording.bin</>
+
+Validate trace against current source:
+  <p(245)>deno replay --validate recording.bin</>"
+    ),
+    UnstableArgsConfig::None,
+  )
+  .defer(|cmd| {
+    cmd
+      .arg(
+        Arg::new("trace_file")
+          .help("The trace file to replay")
+          .required(true)
+          .value_hint(ValueHint::FilePath),
+      )
+      .arg(
+        Arg::new("info")
+          .long("info")
+          .help("Print trace metadata and exit")
+          .action(ArgAction::SetTrue),
+      )
+      .arg(
+        Arg::new("validate")
+          .long("validate")
+          .help("Validate the trace file without replaying")
+          .action(ArgAction::SetTrue),
+      )
+  })
 }
 
 fn serve_host_validator(host: &str) -> Result<String, String> {
@@ -7016,6 +7075,18 @@ fn repl_parse(
   Ok(())
 }
 
+fn replay_parse(flags: &mut Flags, matches: &mut ArgMatches) {
+  let trace_file = matches.remove_one::<String>("trace_file").unwrap();
+  let info = matches.get_flag("info");
+  let validate = matches.get_flag("validate");
+
+  flags.subcommand = DenoSubcommand::Replay(ReplayFlags {
+    trace_file,
+    info,
+    validate,
+  });
+}
+
 fn run_parse(
   flags: &mut Flags,
   matches: &mut ArgMatches,
@@ -7028,6 +7099,7 @@ fn run_parse(
   flags.tunnel = matches.get_flag("tunnel");
   flags.code_cache_enabled = !matches.get_flag("no-code-cache");
   let coverage_dir = matches.remove_one::<String>("coverage");
+  let record = matches.remove_one::<String>("record");
   flags.cpu_prof = cpu_prof_parse(matches);
 
   match matches.remove_many::<String>("script_arg") {
@@ -7040,6 +7112,7 @@ fn run_parse(
         bare,
         coverage_dir,
         print_task_list: false,
+        record,
       });
     }
     _ => {
@@ -7056,6 +7129,7 @@ fn run_parse(
           bare: false,
           coverage_dir: None,
           print_task_list: true,
+          record: None,
         });
       }
     }
@@ -8177,6 +8251,7 @@ mod tests {
           bare: false,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8204,6 +8279,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8232,6 +8308,7 @@ mod tests {
           bare: false,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8260,6 +8337,7 @@ mod tests {
           bare: false,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8288,6 +8366,7 @@ mod tests {
           bare: false,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8317,6 +8396,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8349,6 +8429,7 @@ mod tests {
           bare: false,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8380,6 +8461,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8408,6 +8490,7 @@ mod tests {
           bare: false,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8437,6 +8520,7 @@ mod tests {
           bare: false,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8465,6 +8549,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8505,6 +8590,7 @@ mod tests {
           bare: false,
           coverage_dir: Some("foo".to_string()),
           print_task_list: false,
+          record: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8758,6 +8844,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         permissions: PermissionFlags {
           deny_read: Some(vec![]),
@@ -10168,6 +10255,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         permissions: PermissionFlags {
           deny_net: Some(svec!["127.0.0.1"]),
@@ -10401,6 +10489,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         permissions: PermissionFlags {
           deny_sys: Some(svec!["hostname"]),
@@ -10702,6 +10791,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         ..Flags::default()
       }
@@ -11026,6 +11116,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         log_level: Some(Level::Error),
         code_cache_enabled: true,
@@ -11148,6 +11239,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         type_check_mode: TypeCheckMode::None,
         code_cache_enabled: true,
@@ -11321,6 +11413,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         node_modules_dir: Some(NodeModulesDirMode::Auto),
         code_cache_enabled: true,
@@ -12548,6 +12641,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         inspect_wait: Some("127.0.0.1:9229".parse().unwrap()),
         code_cache_enabled: true,
@@ -13255,6 +13349,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         type_check_mode: TypeCheckMode::None,
         code_cache_enabled: true,
@@ -14166,6 +14261,7 @@ mod tests {
           bare: true,
           coverage_dir: None,
           print_task_list: false,
+          record: None,
         }),
         config_flag: ConfigFlag::Disabled,
         code_cache_enabled: true,

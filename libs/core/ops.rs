@@ -25,6 +25,11 @@ use crate::runtime::UnrefedOps;
 pub type PromiseId = i32;
 pub type OpId = u16;
 
+/// Shared queue for tracking async ops called during replay.
+/// Populated by map_async_op_* (via OpCtx), consumed by dispatch_replay_ops.
+pub(crate) type ReplayPromiseQueue =
+  Rc<RefCell<std::collections::VecDeque<(PromiseId, OpId)>>>;
+
 #[cfg(debug_assertions)]
 thread_local! {
   static CURRENT_OP: std::cell::Cell<Option<&'static OpDecl>> = None.into();
@@ -99,6 +104,16 @@ pub struct OpCtx {
 
   op_driver: Rc<OpDriverImpl>,
   runtime_state: *const JsRuntimeState,
+
+  /// When true, async ops are forced to use lazy scheduling so they all
+  /// flow through `dispatch_pending_ops()` where recording hooks can
+  /// capture their results.
+  pub(crate) trace_recording: bool,
+
+  /// When set, async ops push their (promise_id, op_id) here instead of
+  /// running the real future. The replay driver consumes this queue and
+  /// resolves promises with recorded trace data.
+  pub(crate) replay_promise_queue: Option<ReplayPromiseQueue>,
 }
 
 impl OpCtx {
@@ -133,6 +148,8 @@ impl OpCtx {
       isolate,
       metrics_fn,
       enable_stack_trace,
+      trace_recording: false,
+      replay_promise_queue: None,
     }
   }
 
