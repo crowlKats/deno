@@ -53,6 +53,7 @@ async fn run_replay(flags: Arc<Flags>) -> Result<i32, AnyError> {
   Ok(exit_code)
 }
 
+#[allow(clippy::print_stdout)]
 fn print_trace_info(path: &Path) -> Result<i32, AnyError> {
   let info = deno_core::trace::read_trace_info(path)?;
 
@@ -65,6 +66,9 @@ fn print_trace_info(path: &Path) -> Result<i32, AnyError> {
   println!("Target: {}", info.header.target);
   println!("Recorded at: {recorded_at}");
   println!("Entry point: {}", info.header.entry_point);
+  if let Some(seed) = info.header.seed {
+    println!("Seed: {seed}");
+  }
   println!("Registered ops: {}", info.header.op_names.len());
   println!("Recorded events: {}", info.event_count);
   println!("File size: {}", human_readable_size(info.file_size));
@@ -72,6 +76,7 @@ fn print_trace_info(path: &Path) -> Result<i32, AnyError> {
   Ok(0)
 }
 
+#[allow(clippy::print_stdout)]
 fn validate_trace(path: &Path) -> Result<i32, AnyError> {
   let info = deno_core::trace::read_trace_info(path)?;
 

@@ -13,12 +13,13 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use serde::Deserialize;
 use serde::Serialize;
 
 const TRACE_MAGIC: &[u8; 9] = b"DENO_REC\0";
-const TRACE_VERSION: u32 = 1;
+const TRACE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceHeader {
@@ -29,6 +30,9 @@ pub struct TraceHeader {
   pub recorded_at: u64,
   pub entry_point: String,
   pub op_names: Vec<String>,
+  /// Seed used for Math.random and crypto.getRandomValues determinism.
+  /// If None during recording, a random seed was auto-generated.
+  pub seed: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,11 +47,19 @@ pub struct TraceEvent {
 
 /// Records async op results to a trace file during execution.
 pub struct TraceRecorder {
-  writer: RefCell<BufWriter<std::fs::File>>,
+  /// In streaming mode (no limit), writes directly to file.
+  /// In ring buffer mode, this is None until flush.
+  writer: RefCell<Option<BufWriter<std::fs::File>>>,
+  header: TraceHeader,
+  path: PathBuf,
   sequence_counter: Cell<u64>,
-  #[allow(dead_code)]
   op_names: Vec<String>,
   event_count: Cell<u64>,
+  /// Ring buffer for --record-limit mode.
+  ring_buffer: RefCell<Option<std::collections::VecDeque<TraceEvent>>>,
+  ring_limit: Option<usize>,
+  /// Op name filter — only record ops whose names are in this set.
+  filter: Option<Vec<String>>,
 }
 
 impl TraceRecorder {
@@ -55,10 +67,10 @@ impl TraceRecorder {
     path: &Path,
     entry_point: String,
     op_names: Vec<String>,
+    seed: Option<u64>,
+    limit: Option<usize>,
+    filter: Option<Vec<String>>,
   ) -> std::io::Result<Self> {
-    let file = std::fs::File::create(path)?;
-    let mut writer = BufWriter::new(file);
-
     let header = TraceHeader {
       version: TRACE_VERSION,
       deno_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -70,20 +82,34 @@ impl TraceRecorder {
         .as_millis() as u64,
       entry_point,
       op_names: op_names.clone(),
+      seed,
     };
 
-    // Write magic
-    writer.write_all(TRACE_MAGIC)?;
-    // Write header using bincode
-    bincode::serialize_into(&mut writer, &header)
-      .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    writer.flush()?;
+    let writer = if limit.is_some() {
+      // In ring buffer mode, defer writing until flush
+      None
+    } else {
+      let file = std::fs::File::create(path)?;
+      let mut writer = BufWriter::new(file);
+      writer.write_all(TRACE_MAGIC)?;
+      bincode::serialize_into(&mut writer, &header)
+        .map_err(std::io::Error::other)?;
+      writer.flush()?;
+      Some(writer)
+    };
+
+    let ring_buffer = limit.map(std::collections::VecDeque::with_capacity);
 
     Ok(Self {
       writer: RefCell::new(writer),
+      header,
+      path: path.to_path_buf(),
       sequence_counter: Cell::new(0),
       op_names,
       event_count: Cell::new(0),
+      ring_buffer: RefCell::new(ring_buffer),
+      ring_limit: limit,
+      filter,
     })
   }
 
@@ -95,6 +121,14 @@ impl TraceRecorder {
     is_ok: bool,
     payload: Vec<u8>,
   ) {
+    // Apply op name filter
+    if let Some(ref filter) = self.filter {
+      let name = self.op_name(op_id);
+      if !filter.iter().any(|f| name.contains(f.as_str())) {
+        return;
+      }
+    }
+
     let seq = self.sequence_counter.get();
     self.sequence_counter.set(seq + 1);
 
@@ -106,21 +140,61 @@ impl TraceRecorder {
       payload,
     };
 
-    let mut writer = self.writer.borrow_mut();
-    if let Err(e) =
-      bincode::serialize_into(&mut *writer, &event).and_then(|_| {
-        writer
-          .flush()
-          .map_err(|e| Box::new(bincode::ErrorKind::Io(e)))
-      })
-    {
-      #[allow(clippy::print_stderr)]
+    if let Some(limit) = self.ring_limit {
+      // Ring buffer mode — keep in memory
+      let mut ring = self.ring_buffer.borrow_mut();
+      if let Some(ref mut buf) = *ring {
+        if buf.len() >= limit {
+          buf.pop_front();
+        }
+        buf.push_back(event);
+      }
+    } else {
+      // Streaming mode — write directly
+      let mut writer_opt = self.writer.borrow_mut();
+      if let Some(ref mut writer) = *writer_opt
+        && let Err(e) =
+          bincode::serialize_into(&mut *writer, &event).and_then(|_| {
+            writer
+              .flush()
+              .map_err(|e| Box::new(bincode::ErrorKind::Io(e)))
+          })
       {
-        eprintln!("Warning: failed to write trace event: {e}");
+        #[allow(clippy::print_stderr)]
+        {
+          eprintln!("Warning: failed to write trace event: {e}");
+        }
       }
     }
 
     self.event_count.set(self.event_count.get() + 1);
+  }
+
+  /// Flush ring buffer to disk. Called on drop for ring buffer mode.
+  fn flush_ring_buffer(&self) {
+    let ring = self.ring_buffer.borrow();
+    let Some(ref buf) = *ring else { return };
+
+    let result = (|| -> std::io::Result<()> {
+      let file = std::fs::File::create(&self.path)?;
+      let mut writer = BufWriter::new(file);
+      writer.write_all(TRACE_MAGIC)?;
+      bincode::serialize_into(&mut writer, &self.header)
+        .map_err(std::io::Error::other)?;
+      for event in buf.iter() {
+        bincode::serialize_into(&mut writer, event)
+          .map_err(std::io::Error::other)?;
+      }
+      writer.flush()?;
+      Ok(())
+    })();
+
+    if let Err(e) = result {
+      #[allow(clippy::print_stderr)]
+      {
+        eprintln!("Warning: failed to flush trace ring buffer: {e}");
+      }
+    }
   }
 
   pub fn event_count(&self) -> u64 {
@@ -132,11 +206,19 @@ impl TraceRecorder {
   }
 }
 
+impl Drop for TraceRecorder {
+  fn drop(&mut self) {
+    if self.ring_limit.is_some() {
+      self.flush_ring_buffer();
+    }
+  }
+}
+
 /// Reads trace events for replay.
 pub struct TraceReplayer {
   pub header: TraceHeader,
   events: Vec<TraceEvent>,
-  position: Cell<usize>,
+  position: Rc<Cell<usize>>,
 }
 
 impl TraceReplayer {
@@ -174,15 +256,12 @@ impl TraceReplayer {
       match bincode::deserialize_from::<_, TraceEvent>(&mut reader) {
         Ok(event) => events.push(event),
         Err(e) => {
-          if let bincode::ErrorKind::Io(ref io_err) = *e {
-            if io_err.kind() == std::io::ErrorKind::UnexpectedEof {
-              break;
-            }
+          if let bincode::ErrorKind::Io(ref io_err) = *e
+            && io_err.kind() == std::io::ErrorKind::UnexpectedEof
+          {
+            break;
           }
-          return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            e,
-          ));
+          return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
         }
       }
     }
@@ -190,7 +269,7 @@ impl TraceReplayer {
     Ok(Self {
       header,
       events,
-      position: Cell::new(0),
+      position: Rc::new(Cell::new(0)),
     })
   }
 
@@ -226,12 +305,26 @@ impl TraceReplayer {
     self.position.get()
   }
 
+  /// Skip to a specific position in the replay.
+  pub fn seek_to(&self, position: usize) {
+    self.position.set(position.min(self.events.len()));
+  }
+
   pub fn op_name(&self, op_id: u16) -> &str {
     self
       .header
       .op_names
       .get(op_id as usize)
       .map_or("unknown", |s| s)
+  }
+
+  /// Create inspector info sharing the position with this replayer.
+  pub fn inspector_info(&self) -> crate::inspector::ReplayInspectorInfo {
+    crate::inspector::ReplayInspectorInfo {
+      header: self.header.clone(),
+      events: self.events.clone(),
+      position: self.position.clone(),
+    }
   }
 }
 
@@ -258,15 +351,12 @@ pub fn read_trace_info(path: &Path) -> std::io::Result<TraceInfo> {
     match bincode::deserialize_from::<_, TraceEvent>(&mut reader) {
       Ok(_) => event_count += 1,
       Err(e) => {
-        if let bincode::ErrorKind::Io(ref io_err) = *e {
-          if io_err.kind() == std::io::ErrorKind::UnexpectedEof {
-            break;
-          }
+        if let bincode::ErrorKind::Io(ref io_err) = *e
+          && io_err.kind() == std::io::ErrorKind::UnexpectedEof
+        {
+          break;
         }
-        return Err(std::io::Error::new(
-          std::io::ErrorKind::InvalidData,
-          e,
-        ));
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
       }
     }
   }
@@ -293,6 +383,17 @@ pub enum TraceMode {
   Record {
     path: PathBuf,
     entry_point: String,
+    seed: Option<u64>,
+    /// Keep only the last N events (ring buffer mode).
+    limit: Option<usize>,
+    /// Only record ops matching these names.
+    filter: Option<Vec<String>>,
   },
-  Replay(PathBuf),
+  Replay {
+    path: PathBuf,
+    /// Skip to the Nth event before starting replay.
+    seek: Option<u64>,
+    /// Replay speed multiplier (e.g., 2.0 for double speed).
+    speed: Option<f64>,
+  },
 }

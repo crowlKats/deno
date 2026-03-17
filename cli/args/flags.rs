@@ -422,14 +422,30 @@ pub struct RunFlags {
   pub coverage_dir: Option<String>,
   pub print_task_list: bool,
   pub record: Option<String>,
+  pub record_limit: Option<usize>,
+  pub record_filter: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ReplayFlags {
   pub trace_file: String,
   pub info: bool,
   pub validate: bool,
+  pub seek: Option<u64>,
+  pub speed: Option<f64>,
 }
+
+impl PartialEq for ReplayFlags {
+  fn eq(&self, other: &Self) -> bool {
+    self.trace_file == other.trace_file
+      && self.info == other.info
+      && self.validate == other.validate
+      && self.seek == other.seek
+      && self.speed.map(|f| f.to_bits()) == other.speed.map(|f| f.to_bits())
+  }
+}
+
+impl Eq for ReplayFlags {}
 
 impl RunFlags {
   #[cfg(test)]
@@ -441,6 +457,8 @@ impl RunFlags {
       coverage_dir: None,
       print_task_list: false,
       record: None,
+      record_limit: None,
+      record_filter: None,
     }
   }
 
@@ -4073,6 +4091,21 @@ fn run_args(command: Command, top_level: bool) -> Command {
           .help("Record execution trace to a file for deterministic replay")
           .value_name("FILE")
           .value_hint(ValueHint::FilePath),
+      )
+      .arg(
+        Arg::new("record-limit")
+          .long("record-limit")
+          .help("Keep only the last N events in the trace (ring buffer mode)")
+          .value_name("N")
+          .value_parser(value_parser!(usize))
+          .requires("record"),
+      )
+      .arg(
+        Arg::new("record-filter")
+          .long("record-filter")
+          .help("Only record ops matching this comma-separated list of names")
+          .value_name("OPS")
+          .requires("record"),
       ),
   )
   .arg(tunnel_arg())
@@ -4182,6 +4215,7 @@ Validate trace against current source:
     UnstableArgsConfig::None,
   )
   .defer(|cmd| {
+    let cmd = inspect_args(cmd);
     cmd
       .arg(
         Arg::new("trace_file")
@@ -4200,6 +4234,20 @@ Validate trace against current source:
           .long("validate")
           .help("Validate the trace file without replaying")
           .action(ArgAction::SetTrue),
+      )
+      .arg(
+        Arg::new("seek")
+          .long("seek")
+          .help("Skip to the Nth event before starting replay")
+          .value_name("N")
+          .value_parser(value_parser!(u64)),
+      )
+      .arg(
+        Arg::new("speed")
+          .long("speed")
+          .help("Replay speed multiplier (e.g., 2.0 for double speed)")
+          .value_name("FACTOR")
+          .value_parser(value_parser!(f64)),
       )
   })
 }
@@ -7076,14 +7124,20 @@ fn repl_parse(
 }
 
 fn replay_parse(flags: &mut Flags, matches: &mut ArgMatches) {
+  inspect_arg_parse(flags, matches);
+
   let trace_file = matches.remove_one::<String>("trace_file").unwrap();
   let info = matches.get_flag("info");
   let validate = matches.get_flag("validate");
+  let seek = matches.remove_one::<u64>("seek");
+  let speed = matches.remove_one::<f64>("speed");
 
   flags.subcommand = DenoSubcommand::Replay(ReplayFlags {
     trace_file,
     info,
     validate,
+    seek,
+    speed,
   });
 }
 
@@ -7100,6 +7154,8 @@ fn run_parse(
   flags.code_cache_enabled = !matches.get_flag("no-code-cache");
   let coverage_dir = matches.remove_one::<String>("coverage");
   let record = matches.remove_one::<String>("record");
+  let record_limit = matches.remove_one::<usize>("record-limit");
+  let record_filter = matches.remove_one::<String>("record-filter");
   flags.cpu_prof = cpu_prof_parse(matches);
 
   match matches.remove_many::<String>("script_arg") {
@@ -7113,6 +7169,8 @@ fn run_parse(
         coverage_dir,
         print_task_list: false,
         record,
+        record_limit,
+        record_filter,
       });
     }
     _ => {
@@ -7130,6 +7188,8 @@ fn run_parse(
           coverage_dir: None,
           print_task_list: true,
           record: None,
+          record_limit: None,
+          record_filter: None,
         });
       }
     }
@@ -8252,6 +8312,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8280,6 +8342,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8309,6 +8373,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8338,6 +8404,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8367,6 +8435,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8397,6 +8467,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8430,6 +8502,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8462,6 +8536,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8491,6 +8567,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8521,6 +8599,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8550,6 +8630,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8591,6 +8673,8 @@ mod tests {
           coverage_dir: Some("foo".to_string()),
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         code_cache_enabled: true,
         ..Flags::default()
@@ -8845,6 +8929,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         permissions: PermissionFlags {
           deny_read: Some(vec![]),
@@ -10256,6 +10342,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         permissions: PermissionFlags {
           deny_net: Some(svec!["127.0.0.1"]),
@@ -10490,6 +10578,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         permissions: PermissionFlags {
           deny_sys: Some(svec!["hostname"]),
@@ -10792,6 +10882,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         ..Flags::default()
       }
@@ -11117,6 +11209,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         log_level: Some(Level::Error),
         code_cache_enabled: true,
@@ -11240,6 +11334,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         type_check_mode: TypeCheckMode::None,
         code_cache_enabled: true,
@@ -11414,6 +11510,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         node_modules_dir: Some(NodeModulesDirMode::Auto),
         code_cache_enabled: true,
@@ -12642,6 +12740,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         inspect_wait: Some("127.0.0.1:9229".parse().unwrap()),
         code_cache_enabled: true,
@@ -13350,6 +13450,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         type_check_mode: TypeCheckMode::None,
         code_cache_enabled: true,
@@ -14262,6 +14364,8 @@ mod tests {
           coverage_dir: None,
           print_task_list: false,
           record: None,
+          record_limit: None,
+          record_filter: None,
         }),
         config_flag: ConfigFlag::Disabled,
         code_cache_enabled: true,

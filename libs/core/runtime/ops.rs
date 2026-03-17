@@ -61,13 +61,9 @@ pub fn map_async_op_infallible<R: 'static>(
   } else {
     op_scheduling(lazy, deferred)
   };
-  ctx.op_driver().submit_op_infallible_scheduling(
-    scheduling,
-    ctx.id,
-    promise_id,
-    op,
-    rv_map,
-  )
+  ctx
+    .op_driver()
+    .submit_op_infallible_scheduling(scheduling, ctx.id, promise_id, op, rv_map)
 }
 
 #[inline(always)]
@@ -100,13 +96,9 @@ pub fn map_async_op_fallible<R: 'static, E: JsErrorClass + 'static>(
   } else {
     op_scheduling(lazy, deferred)
   };
-  ctx.op_driver().submit_op_fallible_scheduling(
-    scheduling,
-    ctx.id,
-    promise_id,
-    op,
-    rv_map,
-  )
+  ctx
+    .op_driver()
+    .submit_op_fallible_scheduling(scheduling, ctx.id, promise_id, op, rv_map)
 }
 
 macro_rules! try_integer_some {

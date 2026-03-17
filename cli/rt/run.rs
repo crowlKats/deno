@@ -1057,6 +1057,7 @@ pub async fn run(
     node_ipc_init: None,
     serve_port: None,
     serve_host: None,
+    trace_mode: None,
     otel_config: metadata.otel_config,
     no_legacy_abort: false,
     startup_snapshot: deno_snapshots::CLI_SNAPSHOT,

@@ -419,6 +419,7 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
         (create_isolate_create_params(&shared.sys), None)
       };
 
+      let worker_entry_point = args.main_module.to_string();
       let options = WebWorkerOptions {
         name: args.name,
         main_module: args.main_module.clone(),
@@ -466,6 +467,37 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
         stdio: stdio.clone(),
         cache_storage_dir,
         trace_ops: shared.options.trace_ops.clone(),
+        trace_mode: shared.options.trace_mode.as_ref().map(|mode| {
+          let worker_id_str = args.worker_id.to_string();
+          match mode {
+            deno_core::TraceMode::Record {
+              path,
+              entry_point: _,
+              seed,
+              limit,
+              filter,
+            } => {
+              let mut worker_path = path.as_os_str().to_owned();
+              worker_path.push(format!(".{worker_id_str}"));
+              deno_core::TraceMode::Record {
+                path: std::path::PathBuf::from(worker_path),
+                entry_point: worker_entry_point.clone(),
+                seed: *seed,
+                limit: *limit,
+                filter: filter.clone(),
+              }
+            }
+            deno_core::TraceMode::Replay { path, seek, speed } => {
+              let mut worker_path = path.as_os_str().to_owned();
+              worker_path.push(format!(".{worker_id_str}"));
+              deno_core::TraceMode::Replay {
+                path: std::path::PathBuf::from(worker_path),
+                seek: *seek,
+                speed: *speed,
+              }
+            }
+          }
+        }),
         close_on_idle: args.close_on_idle,
         maybe_worker_metadata: args.maybe_worker_metadata,
         maybe_coverage_dir: shared.maybe_coverage_dir.clone(),

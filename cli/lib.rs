@@ -681,10 +681,37 @@ pub fn main() {
     // NOTE(lucacasonato): due to new PKU feature introduced in V8 11.6 we need to
     // initialize the V8 platform on a parent thread of all threads that will spawn
     // V8 isolates.
-    let flags = match resolve_flags_and_init(args, initial_cwd.clone()).await {
-      Ok(flags) => flags,
-      Err(err) => return (Err(err), initial_cwd),
-    };
+    let mut flags =
+      match resolve_flags_and_init(args, initial_cwd.clone()).await {
+        Ok(flags) => flags,
+        Err(err) => return (Err(err), initial_cwd),
+      };
+
+    // For recording/replay, ensure Math.random and crypto are seeded
+    // deterministically via V8's --random-seed flag.
+    match &flags.subcommand {
+      DenoSubcommand::Replay(replay_flags) => {
+        // Read seed from trace header
+        if let Ok(info) = deno_core::trace::read_trace_info(
+          std::path::Path::new(&replay_flags.trace_file),
+        )
+          && let Some(seed) = info.header.seed
+          && flags.seed.is_none()
+        {
+          flags.seed = Some(seed);
+          flags.v8_flags.push(format!("--random-seed={seed}"));
+        }
+      }
+      DenoSubcommand::Run(run_flags) if run_flags.record.is_some() => {
+        // Auto-generate a seed for deterministic replay if not provided
+        if flags.seed.is_none() {
+          let seed: u64 = rand::random();
+          flags.seed = Some(seed);
+          flags.v8_flags.push(format!("--random-seed={seed}"));
+        }
+      }
+      _ => {}
+    }
 
     if waited_unconfigured_runtime.is_none() {
       init_v8(&flags);

@@ -776,15 +776,16 @@ impl CliOptions {
             )?,
           DenoSubcommand::Replay(replay_flags) => {
             // Read the entry point from the trace file header
-            let info =
-              deno_core::trace::read_trace_info(Path::new(&replay_flags.trace_file))
-                .map_err(|e| {
-                  deno_core::anyhow::anyhow!(
-                    "Failed to read trace file '{}': {}",
-                    replay_flags.trace_file,
-                    e
-                  )
-                })?;
+            let info = deno_core::trace::read_trace_info(Path::new(
+              &replay_flags.trace_file,
+            ))
+            .map_err(|e| {
+              deno_core::anyhow::anyhow!(
+                "Failed to read trace file '{}': {}",
+                replay_flags.trace_file,
+                e
+              )
+            })?;
             if info.header.entry_point.is_empty() {
               bail!("Trace file does not contain an entry point.")
             }
@@ -1273,16 +1274,27 @@ impl CliOptions {
 
   pub fn trace_mode(&self) -> Option<deno_core::TraceMode> {
     match &self.flags.subcommand {
-      DenoSubcommand::Run(run_flags) => run_flags.record.as_ref().map(|path| {
-        deno_core::TraceMode::Record {
-          path: std::path::PathBuf::from(path),
-          entry_point: run_flags.script.clone(),
-        }
-      }),
+      DenoSubcommand::Run(run_flags) => {
+        run_flags
+          .record
+          .as_ref()
+          .map(|path| deno_core::TraceMode::Record {
+            path: std::path::PathBuf::from(path),
+            entry_point: run_flags.script.clone(),
+            seed: self.flags.seed,
+            limit: run_flags.record_limit,
+            filter: run_flags
+              .record_filter
+              .as_ref()
+              .map(|f| f.split(',').map(|s| s.trim().to_string()).collect()),
+          })
+      }
       DenoSubcommand::Replay(replay_flags) => {
-        Some(deno_core::TraceMode::Replay(std::path::PathBuf::from(
-          &replay_flags.trace_file,
-        )))
+        Some(deno_core::TraceMode::Replay {
+          path: std::path::PathBuf::from(&replay_flags.trace_file),
+          seek: replay_flags.seek,
+          speed: replay_flags.speed,
+        })
       }
       _ => None,
     }

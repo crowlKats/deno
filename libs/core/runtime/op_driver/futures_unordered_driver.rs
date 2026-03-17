@@ -236,6 +236,7 @@ impl<C: OpMappingContext> OpDriver<C> for FuturesUnorderedDriver<C> {
     }
     self.completed_ops.borrow_mut().clear();
     self.queue.queue.queue.borrow_mut().clear();
+    self.len.set(0);
   }
 
   fn stats(&self, op_exclusions: &BitSet) -> OpInflightStats {

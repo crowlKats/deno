@@ -1023,6 +1023,14 @@ impl CliFactory {
       .root_permissions_container
       .get_or_try_init(|| {
         let desc_parser = self.permission_desc_parser()?.clone();
+        // Replay mode grants all permissions since no real I/O occurs —
+        // async ops return recorded values and modules still need disk access.
+        if matches!(
+          self.cli_options()?.sub_command(),
+          DenoSubcommand::Replay(_)
+        ) {
+          return Ok(PermissionsContainer::allow_all(desc_parser));
+        }
         let permissions = Permissions::from_options(
           desc_parser.as_ref(),
           &self.cli_options()?.permissions_options()?,
@@ -1177,6 +1185,17 @@ impl CliFactory {
   ) -> Result<LibMainWorkerOptions, AnyError> {
     let cli_options = self.cli_options()?;
     let workspace_factory = self.workspace_factory()?;
+    let trace_mode = cli_options.trace_mode();
+    // During replay, restore the seed from the trace header for deterministic
+    // Math.random and crypto.getRandomValues behavior.
+    let seed = match &trace_mode {
+      Some(deno_core::TraceMode::Replay { path, .. }) => {
+        let info = deno_core::trace::read_trace_info(path)?;
+        info.header.seed
+      }
+      Some(deno_core::TraceMode::Record { seed, .. }) => *seed,
+      _ => cli_options.seed(),
+    };
     Ok(LibMainWorkerOptions {
       argv: cli_options.argv().clone(),
       // This optimization is only available for "run" subcommand
@@ -1192,7 +1211,7 @@ impl CliFactory {
       inspect_brk: cli_options.inspect_brk(),
       inspect_wait: cli_options.inspect_wait(),
       trace_ops: cli_options.trace_ops().clone(),
-      trace_mode: cli_options.trace_mode(),
+      trace_mode,
       is_standalone: false,
       auto_serve: std::env::var("DENO_AUTO_SERVE").is_ok(),
       is_inspecting: cli_options.is_inspecting(),
@@ -1204,7 +1223,7 @@ impl CliFactory {
         .or(std::env::args().next()),
       node_debug: std::env::var("NODE_DEBUG").ok(),
       origin_data_folder_path: Some(self.deno_dir()?.origin_data_folder_path()),
-      seed: cli_options.seed(),
+      seed,
       unsafely_ignore_certificate_errors: cli_options
         .unsafely_ignore_certificate_errors()
         .clone(),

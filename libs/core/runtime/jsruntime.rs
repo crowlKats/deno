@@ -1045,6 +1045,12 @@ impl JsRuntime {
       }
 
       // ...we are ready to create a "realm" for the context...
+      // Extract replay info for the inspector before context_state is consumed.
+      let replay_inspector_info = context_state
+        .trace_replayer
+        .as_ref()
+        .map(|r| Rc::new(r.inspector_info()));
+
       let main_realm = {
         let main_realm = JsRealmInner::new(
           context_state,
@@ -1054,6 +1060,11 @@ impl JsRuntime {
         );
         // TODO(bartlomieju): why is this done in here? Maybe we can hoist it out?
         state_rc.has_inspector.set(inspector.is_some());
+        if let Some(ref insp) = inspector
+          && let Some(info) = replay_inspector_info
+        {
+          insp.set_replay_info(info);
+        }
         *state_rc.inspector.borrow_mut() = inspector;
         main_realm
       };
@@ -3053,8 +3064,7 @@ impl JsRuntime {
       // Record the op result if tracing is enabled
       if let Some(ref recorder) = context_state.trace_recorder {
         let is_ok = res.is_ok();
-        let v8_value =
-          res.as_ref().unwrap_or_else(|e| e).clone();
+        let v8_value = *res.as_ref().unwrap_or_else(|e| e);
         let json_value: serde_json::Value =
           serde_v8::from_v8(scope, v8_value).unwrap_or(serde_json::Value::Null);
         let payload = serde_json::to_vec(&json_value).unwrap_or_default();
@@ -3121,6 +3131,12 @@ impl JsRuntime {
         }
         queue.clear();
       }
+      // If both the queue is empty and replay is exhausted, shut down
+      // the op driver so pending futures don't keep the event loop alive.
+      if queue.is_empty() && !replayer.has_more() {
+        drop(queue);
+        context_state.pending_ops.shutdown();
+      }
       return Ok(false);
     }
 
@@ -3152,10 +3168,7 @@ impl JsRuntime {
         }
       };
 
-      context_state
-        .unrefed_ops
-        .borrow_mut()
-        .remove(&promise_id);
+      context_state.unrefed_ops.borrow_mut().remove(&promise_id);
 
       args.push(v8::Integer::new(scope, promise_id).into());
       args.push(v8::Boolean::new(scope, event.is_ok).into());
@@ -3171,13 +3184,6 @@ impl JsRuntime {
       return Ok(false);
     }
 
-    // Wake if there are more events or queued ops to process
-    if replayer.has_more()
-      || !context_state.replay_promise_queue.borrow().is_empty()
-    {
-      cx.waker().wake_by_ref();
-    }
-
     let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
 
     v8::tc_scope!(let tc_scope, scope);
@@ -3191,6 +3197,17 @@ impl JsRuntime {
     }
     if tc_scope.has_terminated() || tc_scope.is_execution_terminating() {
       return Ok(false);
+    }
+
+    // Check if replay is fully done after resolving this batch
+    let queue_empty = context_state.replay_promise_queue.borrow().is_empty();
+    if queue_empty && !replayer.has_more() {
+      // All recorded events consumed and no more ops queued — shut down
+      // the op driver so the pending futures don't keep the event loop alive.
+      context_state.pending_ops.shutdown();
+    } else if replayer.has_more() || !queue_empty {
+      // Wake if there are more events or queued ops to process
+      cx.waker().wake_by_ref();
     }
 
     Ok(true)

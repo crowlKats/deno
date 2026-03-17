@@ -140,6 +140,7 @@ impl ContextState {
     self.tick_info[0] != 0
   }
 
+  #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
     op_driver: Rc<OpDriverImpl>,
     isolate_ptr: v8::UnsafeRawIsolatePtr,
@@ -151,12 +152,12 @@ impl ContextState {
     trace_mode: Option<crate::trace::TraceMode>,
   ) -> Self {
     // Initialize trace recorder/replayer based on trace_mode
-    let op_names: Vec<String> =
-      op_ctxs.iter().map(|ctx| ctx.decl.name.to_string()).collect();
-    let is_recording = matches!(
-      trace_mode,
-      Some(crate::trace::TraceMode::Record { .. })
-    );
+    let op_names: Vec<String> = op_ctxs
+      .iter()
+      .map(|ctx| ctx.decl.name.to_string())
+      .collect();
+    let is_recording =
+      matches!(trace_mode, Some(crate::trace::TraceMode::Record { .. }));
 
     // When recording, set the flag on all OpCtx so async ops use lazy
     // scheduling and flow through dispatch_pending_ops() for capture.
@@ -176,11 +177,17 @@ impl ContextState {
         crate::trace::TraceMode::Record {
           ref path,
           ref entry_point,
+          ref seed,
+          ref limit,
+          ref filter,
         } => {
           match crate::trace::TraceRecorder::new(
             path,
             entry_point.clone(),
             op_names,
+            *seed,
+            *limit,
+            filter.clone(),
           ) {
             Ok(recorder) => trace_recorder = Some(recorder),
             Err(e) => {
@@ -191,9 +198,14 @@ impl ContextState {
             }
           }
         }
-        crate::trace::TraceMode::Replay(ref path) => {
+        crate::trace::TraceMode::Replay {
+          ref path, ref seek, ..
+        } => {
           match crate::trace::TraceReplayer::from_file(path) {
             Ok(replayer) => {
+              if let Some(seek_pos) = *seek {
+                replayer.seek_to(seek_pos as usize);
+              }
               trace_replayer = Some(replayer);
               // Set replay queue on all OpCtx so async ops enqueue
               // their promise_id instead of running real futures.

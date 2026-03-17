@@ -166,6 +166,14 @@ impl Drop for JsRuntimeInspector {
 }
 
 #[derive(Clone)]
+/// Replay trace data shared with inspector sessions for CDP Replay domain.
+pub struct ReplayInspectorInfo {
+  pub header: crate::trace::TraceHeader,
+  pub events: Vec<crate::trace::TraceEvent>,
+  /// Live position updated by the replayer as events are consumed.
+  pub position: Rc<Cell<usize>>,
+}
+
 struct JsRuntimeInspectorState {
   isolate_ptr: v8::UnsafeRawIsolatePtr,
   context: v8::Global<v8::Context>,
@@ -177,6 +185,7 @@ struct JsRuntimeInspectorState {
   nodeworker_enabled: Rc<Cell<bool>>,
   auto_attach_enabled: Rc<Cell<bool>>,
   discover_targets_enabled: Rc<Cell<bool>>,
+  replay_info: Rc<RefCell<Option<Rc<ReplayInspectorInfo>>>>,
 }
 
 struct JsRuntimeInspectorClient(Rc<JsRuntimeInspectorState>);
@@ -352,6 +361,7 @@ impl JsRuntimeInspectorState {
                 self.nodeworker_enabled.clone(),
                 self.auto_attach_enabled.clone(),
                 self.discover_targets_enabled.clone(),
+                self.replay_info.clone(),
               );
 
               let prev = sessions.handshake.replace(session);
@@ -567,6 +577,7 @@ impl JsRuntimeInspector {
       nodeworker_enabled: Rc::new(Cell::new(false)),
       auto_attach_enabled: Rc::new(Cell::new(false)),
       discover_targets_enabled: Rc::new(Cell::new(false)),
+      replay_info: Rc::new(RefCell::new(None)),
     });
     let client = Box::new(JsRuntimeInspectorClient(state.clone()));
     let v8_inspector_client = v8::inspector::V8InspectorClient::new(client);
@@ -618,6 +629,11 @@ impl JsRuntimeInspector {
 
   pub fn is_dispatching_message(&self) -> bool {
     *self.state.is_dispatching_message.borrow()
+  }
+
+  /// Set replay trace info so CDP Replay.* methods can access it.
+  pub fn set_replay_info(&self, info: Rc<ReplayInspectorInfo>) {
+    *self.state.replay_info.borrow_mut() = Some(info);
   }
 
   pub fn context_destroyed(
@@ -738,6 +754,7 @@ impl JsRuntimeInspector {
         inspector.state.nodeworker_enabled.clone(),
         inspector.state.auto_attach_enabled.clone(),
         inspector.state.discover_targets_enabled.clone(),
+        inspector.state.replay_info.clone(),
       );
 
       let session_id = {
@@ -1070,6 +1087,8 @@ struct InspectorSessionState {
   auto_attach_enabled: Rc<Cell<bool>>,
   // Track whether Target.setDiscoverTargets has been called (enables target discovery)
   discover_targets_enabled: Rc<Cell<bool>>,
+  // Replay trace data for CDP Replay.* methods
+  replay_info: Rc<RefCell<Option<Rc<ReplayInspectorInfo>>>>,
 }
 
 /// An inspector session that proxies messages to concrete "transport layer",
@@ -1094,6 +1113,7 @@ impl InspectorSession {
     nodeworker_enabled: Rc<Cell<bool>>,
     auto_attach_enabled: Rc<Cell<bool>>,
     discover_targets_enabled: Rc<Cell<bool>>,
+    replay_info: Rc<RefCell<Option<Rc<ReplayInspectorInfo>>>>,
   ) -> Rc<Self> {
     let state = InspectorSessionState {
       is_dispatching_message,
@@ -1105,6 +1125,7 @@ impl InspectorSession {
       nodeworker_enabled,
       auto_attach_enabled,
       discover_targets_enabled,
+      replay_info,
     };
 
     let v8_session = v8_inspector.connect(
@@ -1318,6 +1339,23 @@ async fn pump_inspector_session_messages(session: Rc<InspectorSession>) {
           });
         }
       }
+      // Replay CDP domain methods
+      m if m.starts_with("Replay.") => {
+        if let Some(id) = &msg_id {
+          let result = handle_replay_method(
+            m,
+            &params,
+            &session.state.replay_info,
+          );
+          let call_id = id.as_i64().unwrap_or(0) as i32;
+          (session.state.send)(InspectorMsg {
+            kind: InspectorMsgKind::Message(call_id),
+            content: json!({ "id": id, "result": result }).to_string(),
+          });
+        }
+        // Don't fall through to the generic response below
+        continue;
+      }
       _ => {
         session.dispatch_message(msg);
         continue;
@@ -1335,6 +1373,101 @@ async fn pump_inspector_session_messages(session: Rc<InspectorSession>) {
         })
         .to_string(),
       });
+    }
+  }
+}
+
+/// Handle CDP Replay.* domain methods.
+///
+/// Supported methods:
+/// - `Replay.getTraceInfo` — returns trace metadata (header, event count)
+/// - `Replay.getEvents` — returns events in a range (params: start, count)
+/// - `Replay.getPosition` — returns current replay position
+/// - `Replay.seek` — jump to a specific event position (params: position)
+fn handle_replay_method(
+  method: &str,
+  params: &Option<serde_json::Value>,
+  replay_info: &Rc<RefCell<Option<Rc<ReplayInspectorInfo>>>>,
+) -> serde_json::Value {
+  let info_ref = replay_info.borrow();
+  let Some(info) = info_ref.as_ref() else {
+    return json!({ "error": "Not in replay mode" });
+  };
+
+  match method {
+    "Replay.getTraceInfo" => {
+      json!({
+        "version": info.header.version,
+        "denoVersion": info.header.deno_version,
+        "v8Version": info.header.v8_version,
+        "target": info.header.target,
+        "recordedAt": info.header.recorded_at,
+        "entryPoint": info.header.entry_point,
+        "seed": info.header.seed,
+        "opCount": info.header.op_names.len(),
+        "eventCount": info.events.len(),
+        "position": info.position.get(),
+      })
+    }
+    "Replay.getEvents" => {
+      let start = params
+        .as_ref()
+        .and_then(|p| p.get("start"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+      let count = params
+        .as_ref()
+        .and_then(|p| p.get("count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100) as usize;
+
+      let end = (start + count).min(info.events.len());
+      let events: Vec<serde_json::Value> = info.events[start..end]
+        .iter()
+        .map(|e| {
+          let op_name = info
+            .header
+            .op_names
+            .get(e.op_id as usize)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+          json!({
+            "sequenceId": e.sequence_id,
+            "opId": e.op_id,
+            "opName": op_name,
+            "promiseId": e.promise_id,
+            "isOk": e.is_ok,
+            "payloadSize": e.payload.len(),
+          })
+        })
+        .collect();
+
+      json!({
+        "events": events,
+        "totalCount": info.events.len(),
+      })
+    }
+    "Replay.getPosition" => {
+      json!({
+        "position": info.position.get(),
+        "totalEvents": info.events.len(),
+      })
+    }
+    "Replay.seek" => {
+      let position = params
+        .as_ref()
+        .and_then(|p| p.get("position"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+      let clamped = position.min(info.events.len());
+      info.position.set(clamped);
+      json!({ "position": clamped })
+    }
+    "Replay.getOpNames" => {
+      json!({ "opNames": info.header.op_names })
+    }
+    _ => {
+      json!({ "error": format!("Unknown method: {method}") })
     }
   }
 }

@@ -397,6 +397,7 @@ pub struct WebWorkerOptions {
   pub cache_storage_dir: Option<std::path::PathBuf>,
   pub stdio: Stdio,
   pub trace_ops: Option<Vec<String>>,
+  pub trace_mode: Option<deno_core::TraceMode>,
   pub close_on_idle: bool,
   pub maybe_worker_metadata: Option<WorkerMetadata>,
   pub maybe_coverage_dir: Option<PathBuf>,
@@ -650,7 +651,7 @@ impl WebWorker {
       wait_for_inspector_disconnect_callback: None,
       custom_module_evaluation_cb: None,
       eval_context_code_cache_cbs: None,
-      trace_mode: None,
+      trace_mode: options.trace_mode.clone(),
     });
 
     {
