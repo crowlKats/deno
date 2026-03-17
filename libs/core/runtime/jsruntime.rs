@@ -23,6 +23,8 @@ use deno_error::JsErrorBox;
 use futures::FutureExt;
 use futures::task::AtomicWaker;
 use smallvec::SmallVec;
+use v8::ValueDeserializerHelper;
+use v8::ValueSerializerHelper;
 
 use super::SnapshotStoreDataStore;
 use super::SnapshottedData;
@@ -2708,6 +2710,23 @@ impl JsRuntimeState {
   }
 }
 
+/// Minimal V8 ValueSerializer/ValueDeserializer delegate for trace recording.
+/// No host objects or shared array buffers — just plain structured clone.
+struct NoopSerializeDelegate;
+
+impl v8::ValueSerializerImpl for NoopSerializeDelegate {
+  fn throw_data_clone_error<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    message: v8::Local<'s, v8::String>,
+  ) {
+    let error = v8::Exception::type_error(scope, message);
+    scope.throw_exception(error);
+  }
+}
+
+impl v8::ValueDeserializerImpl for NoopSerializeDelegate {}
+
 // Related to module loading
 impl JsRuntime {
   #[cfg(test)]
@@ -3065,9 +3084,20 @@ impl JsRuntime {
       if let Some(ref recorder) = context_state.trace_recorder {
         let is_ok = res.is_ok();
         let v8_value = *res.as_ref().unwrap_or_else(|e| e);
-        let json_value: serde_json::Value =
-          serde_v8::from_v8(scope, v8_value).unwrap_or(serde_json::Value::Null);
-        let payload = serde_json::to_vec(&json_value).unwrap_or_default();
+        // Use V8's ValueSerializer to preserve typed arrays, ArrayBuffers, etc.
+        let payload = {
+          let value_serializer =
+            v8::ValueSerializer::new(scope, Box::new(NoopSerializeDelegate));
+          value_serializer.write_header();
+          if value_serializer
+            .write_value(scope.get_current_context(), v8_value)
+            .unwrap_or(false)
+          {
+            value_serializer.release().to_vec()
+          } else {
+            Vec::new()
+          }
+        };
         recorder.record_event(op_id, promise_id, is_ok, payload);
       }
 
@@ -3157,14 +3187,26 @@ impl JsRuntime {
         break;
       };
 
-      // Deserialize the recorded payload back to a V8 value
+      // Deserialize the recorded payload using V8's ValueDeserializer
+      // to correctly restore typed arrays, ArrayBuffers, etc.
       let v8_value: v8::Local<v8::Value> = if event.payload.is_empty() {
         v8::undefined(scope).into()
       } else {
-        match serde_json::from_slice::<serde_json::Value>(&event.payload) {
-          Ok(json_value) => serde_v8::to_v8(scope, json_value)
-            .unwrap_or_else(|_| v8::undefined(scope).into()),
-          Err(_) => v8::undefined(scope).into(),
+        let value_deserializer = v8::ValueDeserializer::new(
+          scope,
+          Box::new(NoopSerializeDelegate),
+          &event.payload,
+        );
+        let context = scope.get_current_context();
+        if value_deserializer
+          .read_header(context)
+          .unwrap_or(false)
+        {
+          value_deserializer
+            .read_value(context)
+            .unwrap_or_else(|| v8::undefined(scope).into())
+        } else {
+          v8::undefined(scope).into()
         }
       };
 
