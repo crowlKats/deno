@@ -31,6 +31,7 @@ use encoding_rs::Decoder;
 use encoding_rs::DecoderResult;
 use encoding_rs::Encoding;
 pub use message_port::MessagePortError;
+pub use nalgebra;
 pub use stream_resource::StreamResourceError;
 
 pub use crate::blob::Blob;
@@ -45,6 +46,8 @@ use crate::blob::op_blob_remove_part;
 use crate::blob::op_blob_revoke_object_url;
 use crate::blob::op_blob_slice_part;
 pub use crate::broadcast_channel::InMemoryBroadcastChannel;
+pub use crate::geometry::DOMMatrix;
+pub use crate::geometry::DOMMatrixReadOnly;
 pub use crate::message_port::JsMessageData;
 pub use crate::message_port::MessagePort;
 pub use crate::message_port::Transferable;

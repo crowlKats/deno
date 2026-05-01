@@ -117,6 +117,10 @@ impl UnsafeWindowSurface {
       let active_context = v8::Local::new(scope, active_context);
       match get_context(id, scope, active_context) {
         Context::Bitmap(context) => context.resize()?,
+        Context::Canvas2D(context) => {
+          let data = self.data.borrow();
+          context.resize_surface(data.width, data.height)?;
+        }
         Context::WebGPU(context) => context.resize(scope),
       }
     }
@@ -142,6 +146,10 @@ impl UnsafeWindowSurface {
       let active_context = v8::Local::new(scope, active_context);
       match get_context(id, scope, active_context) {
         Context::Bitmap(context) => context.resize()?,
+        Context::Canvas2D(context) => {
+          let data = self.data.borrow();
+          context.resize_surface(data.width, data.height)?;
+        }
         Context::WebGPU(context) => context.resize(scope),
       }
     }
@@ -261,6 +269,15 @@ impl UnsafeWindowSurface {
           context.surface_only.as_ref().unwrap();
 
         instance
+          .surface_present(data.id)
+          .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+      }
+      Context::Canvas2D(context) => {
+        context.present_surface()?;
+        let data = self.data.borrow();
+        let surface_only = context.surface_only.as_ref().unwrap();
+        surface_only
+          .instance
           .surface_present(data.id)
           .map_err(|e| JsErrorBox::generic(e.to_string()))?;
       }

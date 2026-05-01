@@ -32,7 +32,7 @@ pub type CreateCanvasContext =
   ) -> Result<v8::Global<v8::Value>, JsErrorBox>;
 
 pub struct OffscreenCanvas {
-  data: Rc<RefCell<DynamicImage>>,
+  pub(crate) data: Rc<RefCell<DynamicImage>>,
 
   active_context: OnceCell<(String, v8::Global<v8::Value>)>,
 }
@@ -68,6 +68,7 @@ impl OffscreenCanvas {
       let active_context = v8::Local::new(scope, active_context);
       match get_context(id, scope, active_context) {
         Context::Bitmap(_) => {}
+        Context::Canvas2D(_) => {}
         Context::WebGPU(context) => context.resize(scope),
       }
     }
@@ -93,6 +94,7 @@ impl OffscreenCanvas {
       let active_context = v8::Local::new(scope, active_context);
       match get_context(id, scope, active_context) {
         Context::Bitmap(_) => {}
+        Context::Canvas2D(_) => {}
         Context::WebGPU(context) => context.resize(scope),
       }
     }
@@ -125,6 +127,7 @@ impl OffscreenCanvas {
     if self.active_context.get().is_none() {
       let create_context: CreateCanvasContext = match context_id.as_str() {
         super::bitmaprenderer::CONTEXT_ID => super::bitmaprenderer::create as _,
+        super::context2d::CONTEXT_ID => super::context2d::create as _,
         deno_webgpu::canvas::CONTEXT_ID => deno_webgpu::canvas::create as _,
         // https://html.spec.whatwg.org/multipage/canvas.html#dom-offscreencanvas-getcontext
         // step 1: if the user agent does not support the requested context,
@@ -169,6 +172,7 @@ impl OffscreenCanvas {
     let context = get_context(&active_context.0, scope, active_context_local);
     match &context {
       Context::Bitmap(_) => {}
+      Context::Canvas2D(_) => {}
       Context::WebGPU(context) => context.bitmap_read_hook(scope)?,
     }
 
@@ -179,6 +183,7 @@ impl OffscreenCanvas {
 
     match &context {
       Context::Bitmap(_) => {}
+      Context::Canvas2D(_) => {}
       Context::WebGPU(context) => {
         context.post_transfer_to_image_bitmap_hook(scope)
       }
@@ -231,6 +236,7 @@ impl OffscreenCanvas {
     let active_context_local = v8::Local::new(scope, &active_context.1);
     match get_context(&active_context.0, scope, active_context_local) {
       Context::Bitmap(_) => {}
+      Context::Canvas2D(_) => {}
       Context::WebGPU(context) => context.bitmap_read_hook(scope)?,
     }
 
@@ -313,6 +319,11 @@ pub enum Context {
   Bitmap(
     deno_core::cppgc::Ref<crate::bitmaprenderer::ImageBitmapRenderingContext>,
   ),
+  #[allow(
+    dead_code,
+    reason = "variant carries the 2d context Ref so its lifetime is tied to the match"
+  )]
+  Canvas2D(deno_core::cppgc::Ref<crate::context2d::CanvasRenderingContext2D>),
   WebGPU(deno_core::cppgc::Ref<deno_webgpu::canvas::GPUCanvasContext>),
 }
 
@@ -328,6 +339,13 @@ pub fn get_context<'t>(
       >(scope, local)
       .unwrap();
       Context::Bitmap(ptr)
+    }
+    crate::context2d::CONTEXT_ID => {
+      let ptr = deno_core::cppgc::try_unwrap_cppgc_persistent_object::<
+        crate::context2d::CanvasRenderingContext2D,
+      >(scope, local)
+      .unwrap();
+      Context::Canvas2D(ptr)
     }
     deno_webgpu::canvas::CONTEXT_ID => {
       let ptr = deno_core::cppgc::try_unwrap_cppgc_persistent_object::<

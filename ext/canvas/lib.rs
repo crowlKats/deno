@@ -7,6 +7,7 @@ use deno_core::v8;
 mod bitmaprenderer;
 mod byow;
 mod canvas;
+mod context2d;
 
 deno_core::extension!(
   deno_canvas,
@@ -14,6 +15,12 @@ deno_core::extension!(
   ops = [op_init_canvas],
   objects = [
     bitmaprenderer::ImageBitmapRenderingContext,
+    context2d::CanvasRenderingContext2D,
+    context2d::CanvasGradient,
+    context2d::CanvasPattern,
+    context2d::ImageData,
+    context2d::Path2D,
+    context2d::TextMetrics,
     canvas::OffscreenCanvas,
     byow::UnsafeWindowSurface,
   ],

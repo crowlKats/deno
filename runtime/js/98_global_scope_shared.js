@@ -212,6 +212,30 @@ const windowOrWorkerGlobalScope = {
     (canvas) => canvas.ImageBitmapRenderingContext,
     loadCanvas,
   ),
+  CanvasRenderingContext2D: core.propNonEnumerableLazyLoaded(
+    (canvas) => canvas.CanvasRenderingContext2D,
+    loadCanvas,
+  ),
+  CanvasGradient: core.propNonEnumerableLazyLoaded(
+    (canvas) => canvas.CanvasGradient,
+    loadCanvas,
+  ),
+  CanvasPattern: core.propNonEnumerableLazyLoaded(
+    (canvas) => canvas.CanvasPattern,
+    loadCanvas,
+  ),
+  ImageData: core.propNonEnumerableLazyLoaded(
+    (canvas) => canvas.ImageData,
+    loadCanvas,
+  ),
+  Path2D: core.propNonEnumerableLazyLoaded(
+    (canvas) => canvas.Path2D,
+    loadCanvas,
+  ),
+  TextMetrics: core.propNonEnumerableLazyLoaded(
+    (canvas) => canvas.TextMetrics,
+    loadCanvas,
+  ),
   GPU: core.propNonEnumerableLazyLoaded((webgpu) => webgpu.GPU, loadWebGPU),
   GPUAdapter: core.propNonEnumerableLazyLoaded(
     (webgpu) => webgpu.GPUAdapter,

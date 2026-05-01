@@ -871,8 +871,8 @@ pub struct DOMMatrixInit {
 #[derive(CppgcBase, Clone)]
 #[repr(C)]
 pub struct DOMMatrixReadOnly {
-  inner: RefCell<Matrix4<f64>>,
-  is_2d: Cell<bool>,
+  pub inner: RefCell<Matrix4<f64>>,
+  pub is_2d: Cell<bool>,
 }
 
 // SAFETY: we're sure `DOMMatrixReadOnly` can be GCed
@@ -1088,6 +1088,24 @@ impl DOMMatrixReadOnly {
   fn identity() -> DOMMatrixReadOnly {
     DOMMatrixReadOnly {
       inner: RefCell::new(Matrix4::identity()),
+      is_2d: Cell::new(true),
+    }
+  }
+
+  /// Build a 2D `DOMMatrixReadOnly` directly from the six affine coefficients.
+  /// Intended for other extensions that already have `(a, b, c, d, e, f)`
+  /// in hand and want to hand a real matrix instance to JS.
+  #[rustfmt::skip]
+  pub fn from_2d_coefficients(
+    a: f64, b: f64, c: f64, d: f64, e: f64, f: f64,
+  ) -> DOMMatrixReadOnly {
+    DOMMatrixReadOnly {
+      inner: RefCell::new(Matrix4::new(
+        a, c, 0.0, e,
+        b, d, 0.0, f,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+      )),
       is_2d: Cell::new(true),
     }
   }
@@ -2039,7 +2057,7 @@ impl DOMMatrixReadOnly {
 #[cppgc_inherits_from(DOMMatrixReadOnly)]
 #[repr(C)]
 pub struct DOMMatrix {
-  base: DOMMatrixReadOnly,
+  pub base: DOMMatrixReadOnly,
 }
 
 // SAFETY: we're sure `DOMMatrix` can be GCed
@@ -2609,6 +2627,24 @@ impl DOMMatrix {
   ) -> v8::Global<v8::Object> {
     self.base.invert_self_inner();
     this
+  }
+}
+
+impl DOMMatrix {
+  /// Build a 2D `DOMMatrix` directly from the six affine coefficients.
+  /// Intended for other extensions (e.g. canvas's `getTransform`) that
+  /// already have `(a, b, c, d, e, f)` and want a real instance.
+  pub fn from_2d_coefficients(
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+  ) -> DOMMatrix {
+    DOMMatrix {
+      base: DOMMatrixReadOnly::from_2d_coefficients(a, b, c, d, e, f),
+    }
   }
 }
 

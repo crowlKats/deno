@@ -454,6 +454,9 @@ raw-window-handle = "0.6.0"
 wgpu-core = "28.0.0"
 wgpu-types = "28.0.0"
 
+# 2d canvas (vello brings its own wgpu, separate from wgpu_core above)
+vello = "0.5"
+
 # macros
 quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }

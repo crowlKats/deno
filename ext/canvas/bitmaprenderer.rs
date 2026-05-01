@@ -53,422 +53,15 @@ impl Drop for SurfaceBitmap {
   }
 }
 
-pub struct ImageBitmapRenderingContext {
-  canvas: v8::Global<v8::Object>,
-  data: ContextData,
-
-  pub surface_only: Option<SurfaceBitmap>,
-
-  #[allow(dead_code, reason = "TODO(@crowlkats): support alpha option")]
-  alpha: bool,
-}
-
-// SAFETY: we're sure this can be GCed
-unsafe impl GarbageCollected for ImageBitmapRenderingContext {
-  fn trace(&self, _visitor: &mut Visitor) {}
-
-  fn get_name(&self) -> &'static std::ffi::CStr {
-    c"ImageBitmapRenderingContext"
-  }
-}
-
-#[op2]
-impl ImageBitmapRenderingContext {
-  #[getter]
-  fn canvas(&self) -> v8::Global<v8::Object> {
-    self.canvas.clone()
-  }
-
-  fn transfer_from_image_bitmap(
-    &self,
-    #[webidl] bitmap: Nullable<Ref<ImageBitmap>>,
-  ) -> Result<(), JsErrorBox> {
-    if let Some(bitmap) = bitmap.into_option() {
-      if bitmap.detached.get().is_some() {
-        return Err(JsErrorBox::new(
-          "DOMExceptionInvalidStateError",
-          "The provided bitmap is detached.",
-        ));
-      }
-
-      // the spec states to set ImageBitmapRenderingContext's bitmap to the same at ImageBitmap's without copy,
-      // and then it detaches and clears it. So we move it instead and then detach it.
-      // Maybe storing it as an RefCell<Rc> might be necessary at some point
-      // but that case hasnt been hit yet
-
-      let _ = bitmap.detached.set(());
-      let new_data =
-        bitmap
-          .data
-          .replace(DynamicImage::new(0, 0, image::ColorType::Rgba8));
-
-      match &self.data {
-        ContextData::Canvas(image) => {
-          *image.borrow_mut() = new_data;
-        }
-        ContextData::Surface(surface_data) => {
-          let surface = surface_data.borrow().id;
-          let SurfaceBitmap {
-            instance,
-            device,
-            queue,
-            render_pipeline,
-            vertex_buffer,
-            index_buffer,
-            bind_group_layout,
-            sampler,
-            ..
-          } = self.surface_only.as_ref().unwrap();
-
-          let (width, height) = new_data.dimensions();
-          let size = wgpu_types::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-          };
-          let texture_desc = wgpu_core::resource::TextureDescriptor {
-            label: None,
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu_types::TextureDimension::D2,
-            format: wgpu_types::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu_types::TextureUsages::TEXTURE_BINDING
-              | wgpu_types::TextureUsages::COPY_DST,
-            view_formats: vec![],
-          };
-
-          let (texture, err) =
-            instance.device_create_texture(*device, &texture_desc, None);
-          maybe_err_to_err(err)?;
-
-          instance
-            .queue_write_texture(
-              *queue,
-              &wgpu_types::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu_types::Origin3d::ZERO,
-                aspect: wgpu_types::TextureAspect::All,
-              },
-              &new_data.to_rgba8(),
-              &wgpu_types::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * width),
-                rows_per_image: Some(height),
-              },
-              &size,
-            )
-            .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
-
-          let (view, err) = instance.texture_create_view(
-            texture,
-            &wgpu_core::resource::TextureViewDescriptor::default(),
-            None,
-          );
-          maybe_err_to_err(err)?;
-
-          let (bind_group, err) = instance.device_create_bind_group(
-            *device,
-            &wgpu_core::binding_model::BindGroupDescriptor {
-              label: None,
-              layout: *bind_group_layout,
-              entries:
-                vec![
-                  wgpu_core::binding_model::BindGroupEntry {
-                    binding: 0,
-                    resource:
-                      wgpu_core::binding_model::BindingResource::TextureView(
-                        view,
-                      ),
-                  },
-                  wgpu_core::binding_model::BindGroupEntry {
-                    binding: 1,
-                    resource:
-                      wgpu_core::binding_model::BindingResource::Sampler(
-                        *sampler,
-                      ),
-                  },
-                ]
-                .into(),
-            },
-            None,
-          );
-          maybe_err_to_err(err)?;
-
-          let surface_output = instance
-            .surface_get_current_texture(surface, None)
-            .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
-          let Some(frame) = surface_output.texture else {
-            return Ok(());
-          };
-
-          let (command_encoder, err) = instance.device_create_command_encoder(
-            *device,
-            &wgpu_types::CommandEncoderDescriptor { label: None },
-            None,
-          );
-          maybe_err_to_err(err)?;
-
-          let (swap_view_id, err) = instance.texture_create_view(
-            frame,
-            &wgpu_core::resource::TextureViewDescriptor::default(),
-            None,
-          );
-          maybe_err_to_err(err)?;
-
-          let desc_with_view = wgpu_core::command::RenderPassDescriptor {
-            label: None,
-            color_attachments: vec![Some(
-              wgpu_core::command::RenderPassColorAttachment {
-                view: swap_view_id,
-                depth_slice: None,
-                resolve_target: None,
-                load_op: wgpu_types::LoadOp::Clear(wgpu_types::Color::BLACK),
-                store_op: Default::default(),
-              },
-            )]
-            .into(),
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-          };
-
-          {
-            let (mut pass, err) = instance.command_encoder_begin_render_pass(
-              command_encoder,
-              &desc_with_view,
-            );
-            maybe_err_to_err(err)?;
-
-            instance
-              .render_pass_set_pipeline(&mut pass, *render_pipeline)
-              .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
-            instance
-              .render_pass_set_bind_group(&mut pass, 0, Some(bind_group), &[])
-              .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
-            instance
-              .render_pass_set_vertex_buffer(
-                &mut pass,
-                0,
-                *vertex_buffer,
-                0,
-                std::num::NonZeroU64::new(size_of_val(VERTICES) as _),
-              )
-              .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
-            instance
-              .render_pass_set_index_buffer(
-                &mut pass,
-                *index_buffer,
-                wgpu_types::IndexFormat::Uint16,
-                0,
-                std::num::NonZeroU64::new(size_of_val(INDICES) as _),
-              )
-              .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
-            instance
-              .render_pass_draw_indexed(&mut pass, 6, 1, 0, 0, 0)
-              .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
-
-            instance
-              .render_pass_end(&mut pass)
-              .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
-          }
-
-          let (command_buffer, err) = instance.command_encoder_finish(
-            command_encoder,
-            &wgpu_types::CommandBufferDescriptor { label: None },
-            None,
-          );
-          if let Some((_, err)) = err {
-            maybe_err_to_err(Some(err))?;
-          }
-
-          instance
-            .queue_submit(*queue, &[command_buffer])
-            .map_err(|(_, e)| JsErrorBox::from_err(GPUError::from(e)))?;
-
-          instance.texture_view_drop(swap_view_id).unwrap();
-          instance.command_encoder_drop(command_encoder);
-          instance.bind_group_drop(bind_group);
-          instance.texture_view_drop(view).unwrap();
-          instance.texture_drop(texture);
-        }
-      }
-    } else {
-      match &self.data {
-        ContextData::Canvas(image) => {
-          image.replace_with(|image| {
-            let (width, height) = image.dimensions();
-            DynamicImage::new(width, height, image::ColorType::Rgba8)
-          });
-        }
-        ContextData::Surface(surface_data) => {
-          let surface = surface_data.borrow().id;
-          let SurfaceBitmap {
-            instance,
-            device,
-            queue,
-            ..
-          } = self.surface_only.as_ref().unwrap();
-
-          let surface_output = instance
-            .surface_get_current_texture(surface, None)
-            .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
-          let Some(frame) = surface_output.texture else {
-            return Ok(());
-          };
-
-          let (command_encoder, err) = instance.device_create_command_encoder(
-            *device,
-            &wgpu_types::CommandEncoderDescriptor { label: None },
-            None,
-          );
-          maybe_err_to_err(err)?;
-
-          let (swap_view_id, err) = instance.texture_create_view(
-            frame,
-            &wgpu_core::resource::TextureViewDescriptor::default(),
-            None,
-          );
-          maybe_err_to_err(err)?;
-
-          {
-            let (mut pass, err) = instance.command_encoder_begin_render_pass(
-              command_encoder,
-              &wgpu_core::command::RenderPassDescriptor {
-                label: None,
-                color_attachments: vec![Some(
-                  wgpu_core::command::RenderPassColorAttachment {
-                    view: swap_view_id,
-                    depth_slice: None,
-                    resolve_target: None,
-                    load_op: wgpu_types::LoadOp::Clear(
-                      wgpu_types::Color::BLACK,
-                    ),
-                    store_op: Default::default(),
-                  },
-                )]
-                .into(),
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-              },
-            );
-            maybe_err_to_err(err)?;
-
-            instance
-              .render_pass_end(&mut pass)
-              .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
-          }
-
-          let (command_buffer, err) = instance.command_encoder_finish(
-            command_encoder,
-            &wgpu_types::CommandBufferDescriptor { label: None },
-            None,
-          );
-          if let Some((_, err)) = err {
-            maybe_err_to_err(Some(err))?;
-          }
-
-          instance
-            .queue_submit(*queue, &[command_buffer])
-            .map_err(|(_, e)| JsErrorBox::from_err(GPUError::from(e)))?;
-
-          instance.texture_view_drop(swap_view_id).unwrap();
-          instance.command_encoder_drop(command_encoder);
-        }
-      }
-    }
-
-    Ok(())
-  }
-}
-
-impl ImageBitmapRenderingContext {
-  pub fn resize(&self) -> Result<(), JsErrorBox> {
-    let SurfaceBitmap {
-      instance,
-      device,
-      surface_configuration,
-      ..
-    } = self.surface_only.as_ref().unwrap();
-    let ContextData::Surface(surface_data) = &self.data else {
-      unreachable!()
-    };
-
-    let deno_webgpu::canvas::SurfaceData {
-      id, width, height, ..
-    } = &*surface_data.borrow();
-
-    let err = instance.surface_configure(
-      *id,
-      *device,
-      &wgpu_types::SurfaceConfiguration {
-        width: *width,
-        height: *height,
-        ..surface_configuration.clone()
-      },
-    );
-
-    maybe_err_to_err(err)
-  }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-  position: [f32; 3],
-  tex_coords: [f32; 2],
-}
-
-const VERTICES: &[Vertex] = &[
-  Vertex {
-    position: [-1.0, 1.0, 0.0],
-    tex_coords: [0.0, 0.0],
-  }, // Top Left
-  Vertex {
-    position: [-1.0, -1.0, 0.0],
-    tex_coords: [0.0, 1.0],
-  }, // Bottom Left
-  Vertex {
-    position: [1.0, -1.0, 0.0],
-    tex_coords: [1.0, 1.0],
-  }, // Bottom Right
-  Vertex {
-    position: [1.0, 1.0, 0.0],
-    tex_coords: [1.0, 0.0],
-  }, // Top Right
-];
-
-const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
-
-pub const CONTEXT_ID: &str = "bitmaprenderer";
-
-pub fn create<'s>(
-  instance: Option<deno_webgpu::Instance>,
-  canvas: v8::Global<v8::Object>,
-  data: ContextData,
-  scope: &mut v8::PinScope<'s, '_>,
-  options: v8::Local<'s, v8::Value>,
-  prefix: &'static str,
-  context: &'static str,
-) -> Result<v8::Global<v8::Value>, JsErrorBox> {
-  let settings = ImageBitmapRenderingContextSettings::convert(
-    scope,
-    options,
-    prefix.into(),
-    (|| context.into()).into(),
-    &(),
-  )
-  .map_err(JsErrorBox::from_err)?;
-
-  let surface_only = if let ContextData::Surface(surface_data) = &data {
-    let deno_webgpu::canvas::SurfaceData {
-      id, width, height, ..
-    } = &*surface_data.borrow();
-    let instance = instance.unwrap();
+impl SurfaceBitmap {
+  /// Build the textured-quad render pipeline that any 2d-style canvas can
+  /// use to push an RGBA8 bitmap to a wgpu surface.
+  pub fn new_for_surface(
+    instance: deno_webgpu::Instance,
+    surface_id: wgpu_core::id::SurfaceId,
+    width: u32,
+    height: u32,
+  ) -> Result<Self, JsErrorBox> {
     let backends = std::env::var("DENO_WEBGPU_BACKEND").map_or_else(
       |_| wgpu_types::Backends::all(),
       |s| wgpu_types::Backends::from_comma_list(&s),
@@ -478,13 +71,12 @@ pub fn create<'s>(
         &wgpu_core::instance::RequestAdapterOptions {
           power_preference: Default::default(),
           force_fallback_adapter: false,
-          compatible_surface: Some(*id),
+          compatible_surface: Some(surface_id),
         },
         backends,
         None,
       )
       .unwrap();
-
     let (device, queue) = instance
       .adapter_request_device(
         adapter,
@@ -501,20 +93,22 @@ pub fn create<'s>(
       )
       .unwrap();
 
-    let caps = instance.surface_get_capabilities(*id, adapter).unwrap();
+    let caps = instance
+      .surface_get_capabilities(surface_id, adapter)
+      .unwrap();
     let format = caps.formats[0];
 
     let config = wgpu_types::SurfaceConfiguration {
       usage: wgpu_types::TextureUsages::RENDER_ATTACHMENT,
       format,
-      width: *width,
-      height: *height,
+      width,
+      height,
       present_mode: wgpu_types::PresentMode::Fifo,
       desired_maximum_frame_latency: 0,
       alpha_mode: wgpu_types::CompositeAlphaMode::Opaque,
       view_formats: vec![],
     };
-    let err = instance.surface_configure(*id, device, &config);
+    let err = instance.surface_configure(surface_id, device, &config);
     maybe_err_to_err(err)?;
 
     let (sampler, err) = instance.device_create_sampler(
@@ -687,7 +281,7 @@ pub fn create<'s>(
         Some(size_of_val(VERTICES) as _),
       )
       .unwrap();
-    // SAFETY: creating a mutable slice from the pointer and length provided by wgpu
+    // SAFETY: range provided by wgpu
     unsafe {
       let slice = std::slice::from_raw_parts_mut(range_ptr.as_ptr(), len as _);
       slice.copy_from_slice(vertex_buffer_data);
@@ -717,14 +311,14 @@ pub fn create<'s>(
     let (range_ptr, len) = instance
       .buffer_get_mapped_range(index_buffer, 0, Some(size_of_val(INDICES) as _))
       .unwrap();
-    // SAFETY: creating a mutable slice from the pointer and length provided by wgpu
+    // SAFETY: range provided by wgpu
     unsafe {
       let slice = std::slice::from_raw_parts_mut(range_ptr.as_ptr(), len as _);
       slice.copy_from_slice(index_buffer_data);
     }
     instance.buffer_unmap(index_buffer).unwrap();
 
-    Some(SurfaceBitmap {
+    Ok(SurfaceBitmap {
       instance,
       adapter,
       device,
@@ -738,6 +332,455 @@ pub fn create<'s>(
       bind_group_layout,
       sampler,
     })
+  }
+
+  /// Upload `rgba` (RGBA8, `width * height * 4` bytes) and render it to the
+  /// surface's current swap-chain texture.
+  pub fn upload_and_render(
+    &self,
+    surface_id: wgpu_core::id::SurfaceId,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+  ) -> Result<(), JsErrorBox> {
+    let SurfaceBitmap {
+      instance,
+      device,
+      queue,
+      render_pipeline,
+      vertex_buffer,
+      index_buffer,
+      bind_group_layout,
+      sampler,
+      ..
+    } = self;
+
+    let size = wgpu_types::Extent3d {
+      width,
+      height,
+      depth_or_array_layers: 1,
+    };
+    let (texture, err) = instance.device_create_texture(
+      *device,
+      &wgpu_core::resource::TextureDescriptor {
+        label: None,
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu_types::TextureDimension::D2,
+        format: wgpu_types::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu_types::TextureUsages::TEXTURE_BINDING
+          | wgpu_types::TextureUsages::COPY_DST,
+        view_formats: vec![],
+      },
+      None,
+    );
+    maybe_err_to_err(err)?;
+
+    instance
+      .queue_write_texture(
+        *queue,
+        &wgpu_types::TexelCopyTextureInfo {
+          texture,
+          mip_level: 0,
+          origin: wgpu_types::Origin3d::ZERO,
+          aspect: wgpu_types::TextureAspect::All,
+        },
+        rgba,
+        &wgpu_types::TexelCopyBufferLayout {
+          offset: 0,
+          bytes_per_row: Some(4 * width),
+          rows_per_image: Some(height),
+        },
+        &size,
+      )
+      .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
+
+    let (view, err) = instance.texture_create_view(
+      texture,
+      &wgpu_core::resource::TextureViewDescriptor::default(),
+      None,
+    );
+    maybe_err_to_err(err)?;
+
+    let (bind_group, err) = instance.device_create_bind_group(
+      *device,
+      &wgpu_core::binding_model::BindGroupDescriptor {
+        label: None,
+        layout: *bind_group_layout,
+        entries: vec![
+          wgpu_core::binding_model::BindGroupEntry {
+            binding: 0,
+            resource: wgpu_core::binding_model::BindingResource::TextureView(
+              view,
+            ),
+          },
+          wgpu_core::binding_model::BindGroupEntry {
+            binding: 1,
+            resource: wgpu_core::binding_model::BindingResource::Sampler(
+              *sampler,
+            ),
+          },
+        ]
+        .into(),
+      },
+      None,
+    );
+    maybe_err_to_err(err)?;
+
+    let surface_output = instance
+      .surface_get_current_texture(surface_id, None)
+      .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
+    let Some(frame) = surface_output.texture else {
+      instance.bind_group_drop(bind_group);
+      instance.texture_view_drop(view).unwrap();
+      instance.texture_drop(texture);
+      return Ok(());
+    };
+
+    let (command_encoder, err) = instance.device_create_command_encoder(
+      *device,
+      &wgpu_types::CommandEncoderDescriptor { label: None },
+      None,
+    );
+    maybe_err_to_err(err)?;
+
+    let (swap_view_id, err) = instance.texture_create_view(
+      frame,
+      &wgpu_core::resource::TextureViewDescriptor::default(),
+      None,
+    );
+    maybe_err_to_err(err)?;
+
+    {
+      let (mut pass, err) = instance.command_encoder_begin_render_pass(
+        command_encoder,
+        &wgpu_core::command::RenderPassDescriptor {
+          label: None,
+          color_attachments: vec![Some(
+            wgpu_core::command::RenderPassColorAttachment {
+              view: swap_view_id,
+              depth_slice: None,
+              resolve_target: None,
+              load_op: wgpu_types::LoadOp::Clear(wgpu_types::Color::BLACK),
+              store_op: Default::default(),
+            },
+          )]
+          .into(),
+          depth_stencil_attachment: None,
+          timestamp_writes: None,
+          occlusion_query_set: None,
+          multiview_mask: None,
+        },
+      );
+      maybe_err_to_err(err)?;
+
+      instance
+        .render_pass_set_pipeline(&mut pass, *render_pipeline)
+        .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
+      instance
+        .render_pass_set_bind_group(&mut pass, 0, Some(bind_group), &[])
+        .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
+      instance
+        .render_pass_set_vertex_buffer(
+          &mut pass,
+          0,
+          *vertex_buffer,
+          0,
+          std::num::NonZeroU64::new(size_of_val(VERTICES) as _),
+        )
+        .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
+      instance
+        .render_pass_set_index_buffer(
+          &mut pass,
+          *index_buffer,
+          wgpu_types::IndexFormat::Uint16,
+          0,
+          std::num::NonZeroU64::new(size_of_val(INDICES) as _),
+        )
+        .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
+      instance
+        .render_pass_draw_indexed(&mut pass, 6, 1, 0, 0, 0)
+        .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
+      instance
+        .render_pass_end(&mut pass)
+        .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
+    }
+
+    let (command_buffer, err) = instance.command_encoder_finish(
+      command_encoder,
+      &wgpu_types::CommandBufferDescriptor { label: None },
+      None,
+    );
+    if let Some((_, err)) = err {
+      maybe_err_to_err(Some(err))?;
+    }
+
+    instance
+      .queue_submit(*queue, &[command_buffer])
+      .map_err(|(_, e)| JsErrorBox::from_err(GPUError::from(e)))?;
+
+    instance.texture_view_drop(swap_view_id).unwrap();
+    instance.command_encoder_drop(command_encoder);
+    instance.bind_group_drop(bind_group);
+    instance.texture_view_drop(view).unwrap();
+    instance.texture_drop(texture);
+    Ok(())
+  }
+
+  /// Render a black clear to the surface (no source bitmap). Used when the
+  /// 2d-style context is reset / detached.
+  pub fn clear_present(
+    &self,
+    surface_id: wgpu_core::id::SurfaceId,
+  ) -> Result<(), JsErrorBox> {
+    let SurfaceBitmap {
+      instance,
+      device,
+      queue,
+      ..
+    } = self;
+    let surface_output = instance
+      .surface_get_current_texture(surface_id, None)
+      .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
+    let Some(frame) = surface_output.texture else {
+      return Ok(());
+    };
+
+    let (command_encoder, err) = instance.device_create_command_encoder(
+      *device,
+      &wgpu_types::CommandEncoderDescriptor { label: None },
+      None,
+    );
+    maybe_err_to_err(err)?;
+
+    let (swap_view_id, err) = instance.texture_create_view(
+      frame,
+      &wgpu_core::resource::TextureViewDescriptor::default(),
+      None,
+    );
+    maybe_err_to_err(err)?;
+
+    {
+      let (mut pass, err) = instance.command_encoder_begin_render_pass(
+        command_encoder,
+        &wgpu_core::command::RenderPassDescriptor {
+          label: None,
+          color_attachments: vec![Some(
+            wgpu_core::command::RenderPassColorAttachment {
+              view: swap_view_id,
+              depth_slice: None,
+              resolve_target: None,
+              load_op: wgpu_types::LoadOp::Clear(wgpu_types::Color::BLACK),
+              store_op: Default::default(),
+            },
+          )]
+          .into(),
+          depth_stencil_attachment: None,
+          timestamp_writes: None,
+          occlusion_query_set: None,
+          multiview_mask: None,
+        },
+      );
+      maybe_err_to_err(err)?;
+      instance
+        .render_pass_end(&mut pass)
+        .map_err(|e| JsErrorBox::from_err(GPUError::from(e)))?;
+    }
+
+    let (command_buffer, err) = instance.command_encoder_finish(
+      command_encoder,
+      &wgpu_types::CommandBufferDescriptor { label: None },
+      None,
+    );
+    if let Some((_, err)) = err {
+      maybe_err_to_err(Some(err))?;
+    }
+
+    instance
+      .queue_submit(*queue, &[command_buffer])
+      .map_err(|(_, e)| JsErrorBox::from_err(GPUError::from(e)))?;
+
+    instance.texture_view_drop(swap_view_id).unwrap();
+    instance.command_encoder_drop(command_encoder);
+    Ok(())
+  }
+
+  /// Reconfigure the surface for a new size.
+  pub fn resize_to(
+    &self,
+    surface_id: wgpu_core::id::SurfaceId,
+    width: u32,
+    height: u32,
+  ) -> Result<(), JsErrorBox> {
+    let err = self.instance.surface_configure(
+      surface_id,
+      self.device,
+      &wgpu_types::SurfaceConfiguration {
+        width,
+        height,
+        ..self.surface_configuration.clone()
+      },
+    );
+    maybe_err_to_err(err)
+  }
+}
+
+pub struct ImageBitmapRenderingContext {
+  canvas: v8::Global<v8::Object>,
+  data: ContextData,
+
+  pub surface_only: Option<SurfaceBitmap>,
+
+  #[allow(dead_code, reason = "TODO(@crowlkats): support alpha option")]
+  alpha: bool,
+}
+
+// SAFETY: we're sure this can be GCed
+unsafe impl GarbageCollected for ImageBitmapRenderingContext {
+  fn trace(&self, _visitor: &mut Visitor) {}
+
+  fn get_name(&self) -> &'static std::ffi::CStr {
+    c"ImageBitmapRenderingContext"
+  }
+}
+
+#[op2]
+impl ImageBitmapRenderingContext {
+  #[getter]
+  fn canvas(&self) -> v8::Global<v8::Object> {
+    self.canvas.clone()
+  }
+
+  fn transfer_from_image_bitmap(
+    &self,
+    #[webidl] bitmap: Nullable<Ref<ImageBitmap>>,
+  ) -> Result<(), JsErrorBox> {
+    if let Some(bitmap) = bitmap.into_option() {
+      if bitmap.detached.get().is_some() {
+        return Err(JsErrorBox::new(
+          "DOMExceptionInvalidStateError",
+          "The provided bitmap is detached.",
+        ));
+      }
+
+      // the spec states to set ImageBitmapRenderingContext's bitmap to the same at ImageBitmap's without copy,
+      // and then it detaches and clears it. So we move it instead and then detach it.
+      // Maybe storing it as an RefCell<Rc> might be necessary at some point
+      // but that case hasnt been hit yet
+
+      let _ = bitmap.detached.set(());
+      let new_data =
+        bitmap
+          .data
+          .replace(DynamicImage::new(0, 0, image::ColorType::Rgba8));
+
+      match &self.data {
+        ContextData::Canvas(image) => {
+          *image.borrow_mut() = new_data;
+        }
+        ContextData::Surface(surface_data) => {
+          let surface = surface_data.borrow().id;
+          let surface_only = self.surface_only.as_ref().unwrap();
+          let (width, height) = new_data.dimensions();
+          let rgba = new_data.to_rgba8();
+          surface_only.upload_and_render(surface, &rgba, width, height)?;
+        }
+      }
+    } else {
+      match &self.data {
+        ContextData::Canvas(image) => {
+          image.replace_with(|image| {
+            let (width, height) = image.dimensions();
+            DynamicImage::new(width, height, image::ColorType::Rgba8)
+          });
+        }
+        ContextData::Surface(surface_data) => {
+          let surface = surface_data.borrow().id;
+          self.surface_only.as_ref().unwrap().clear_present(surface)?;
+        }
+      }
+    }
+
+    Ok(())
+  }
+}
+
+impl ImageBitmapRenderingContext {
+  pub fn resize(&self) -> Result<(), JsErrorBox> {
+    let ContextData::Surface(surface_data) = &self.data else {
+      unreachable!()
+    };
+    let deno_webgpu::canvas::SurfaceData {
+      id, width, height, ..
+    } = &*surface_data.borrow();
+    self
+      .surface_only
+      .as_ref()
+      .unwrap()
+      .resize_to(*id, *width, *height)?;
+    Ok(())
+  }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+  position: [f32; 3],
+  tex_coords: [f32; 2],
+}
+
+const VERTICES: &[Vertex] = &[
+  Vertex {
+    position: [-1.0, 1.0, 0.0],
+    tex_coords: [0.0, 0.0],
+  }, // Top Left
+  Vertex {
+    position: [-1.0, -1.0, 0.0],
+    tex_coords: [0.0, 1.0],
+  }, // Bottom Left
+  Vertex {
+    position: [1.0, -1.0, 0.0],
+    tex_coords: [1.0, 1.0],
+  }, // Bottom Right
+  Vertex {
+    position: [1.0, 1.0, 0.0],
+    tex_coords: [1.0, 0.0],
+  }, // Top Right
+];
+
+const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
+
+pub const CONTEXT_ID: &str = "bitmaprenderer";
+
+pub fn create<'s>(
+  instance: Option<deno_webgpu::Instance>,
+  canvas: v8::Global<v8::Object>,
+  data: ContextData,
+  scope: &mut v8::PinScope<'s, '_>,
+  options: v8::Local<'s, v8::Value>,
+  prefix: &'static str,
+  context: &'static str,
+) -> Result<v8::Global<v8::Value>, JsErrorBox> {
+  let settings = ImageBitmapRenderingContextSettings::convert(
+    scope,
+    options,
+    prefix.into(),
+    (|| context.into()).into(),
+    &(),
+  )
+  .map_err(JsErrorBox::from_err)?;
+
+  let surface_only = if let ContextData::Surface(surface_data) = &data {
+    let deno_webgpu::canvas::SurfaceData {
+      id, width, height, ..
+    } = &*surface_data.borrow();
+    Some(SurfaceBitmap::new_for_surface(
+      instance.unwrap(),
+      *id,
+      *width,
+      *height,
+    )?)
   } else {
     None
   };
